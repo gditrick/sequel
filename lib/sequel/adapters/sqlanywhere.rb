@@ -160,12 +160,13 @@ module Sequel
         execute(sql) do |rs|
           max_cols = db.api.sqlany_num_cols(rs)
           col_map = {}
+          columns = []
           max_cols.times do |cols|
-            col_map[db.api.sqlany_get_column_info(rs, cols)[2]] =
-                output_identifier(db.api.sqlany_get_column_info(rs, cols)[2])
+            col = db.api.sqlany_get_column_info(rs, cols)[2]
+            columns << col_map[col] = output_identifier(col)
           end
 
-          @columns  = col_map.values
+          @columns  = columns
           convert = (convert_smallint_to_bool and db.convert_smallint_to_bool)
 
           while db.api.sqlany_fetch_next(rs) == 1
