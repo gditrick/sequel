@@ -1,10 +1,8 @@
+# frozen-string-literal: true
+#
 # The null_dataset extension adds the Dataset#nullify method, which
 # returns a cloned dataset that will never issue a query to the
 # database.  It implements the null object pattern for datasets.
-#
-# To load the extension:
-#
-#   Sequel.extension :null_dataset
 #
 # The most common usage is probably in a method that must return
 # a dataset, where the method knows the dataset shouldn't return
@@ -15,7 +13,7 @@
 #
 # Usage:
 #
-#   ds = DB[:items].nullify.where(:a=>:b).select(:c)
+#   ds = DB[:items].nullify.where(a: :b).select(:c)
 #   ds.sql # => "SELECT c FROM items WHERE (a = b)"
 #   ds.all # => [] # no query sent to the database
 #
@@ -26,18 +24,26 @@
 # the same options to get the columns.
 #
 # This extension uses Object#extend at runtime, which can hurt performance.
+#
+# To add the nullify method to a single dataset:
+#
+#   ds = ds.extension(:null_dataset)
+#
+# To add the nullify method to all datasets on a single database:
+#
+#   DB.extension(:null_dataset)
+#
+# Related modules: Sequel::Dataset::Nullifiable, Sequel::Dataset::NullDataset
 
+#
 module Sequel
   class Dataset
     module Nullifiable
       # Return a cloned nullified dataset.
       def nullify
-        clone.nullify!
-      end
-
-      # Nullify the current dataset
-      def nullify!
-        extend NullDataset
+        cached_dataset(:_nullify_ds) do
+          with_extend(NullDataset)
+        end
       end
     end
 
@@ -45,7 +51,10 @@ module Sequel
       # Create a new dataset from the dataset (which won't
       # be nulled) to get the columns if they aren't already cached.
       def columns
-        @columns ||= db.dataset.clone(@opts).columns
+        if cols = _columns
+          return cols
+        end
+        self.columns = db.dataset.clone(@opts).columns
       end
 
       # Return 0 without sending a database query.
@@ -54,12 +63,12 @@ module Sequel
       end
 
       # Return self without sending a database query, never yielding.
-      def each
+      def each(&_)
         self
       end
 
       # Return nil without sending a database query, never yielding.
-      def fetch_rows(sql)
+      def fetch_rows(sql, &_)
         nil
       end
 

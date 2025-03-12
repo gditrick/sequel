@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Sequel::Plugins::ErrorSplitter" do
   before do
@@ -11,8 +11,8 @@ describe "Sequel::Plugins::ErrorSplitter" do
   end
 
   it "should split errors for multiple columns and assign them to each column" do
-    @m.valid?.should be_false
-    @m.errors.should == {:a=>['is bad'], :b=>['is bad']}
+    @m.valid?.must_equal false
+    @m.errors.must_equal(:a=>['is bad'], :b=>['is bad'])
   end
 end
 

@@ -1,11 +1,13 @@
+# frozen-string-literal: true
+#
 # The pg_row extension adds support for Sequel to handle
 # PostgreSQL's row-valued/composite types.
 #
-# This extension integrates with Sequel's native postgres adapter, so
+# This extension integrates with Sequel's native postgres and jdbc/postgresql adapters, so
 # that when composite fields are retrieved, they are parsed and returned
 # as instances of Sequel::Postgres::PGRow::(HashRow|ArrayRow), or
 # optionally a custom type.  HashRow and ArrayRow are DelegateClasses of
-# of Hash and Array, so they mostly act like a hash or array, but not
+# Hash and Array, so they mostly act like a hash or array, but not
 # completely (is_a?(Hash) and is_a?(Array) are false).  If you want the
 # actual hash for a HashRow, call HashRow#to_hash, and if you want the
 # actual array for an ArrayRow, call ArrayRow#to_a.  This is done so
@@ -16,19 +18,22 @@
 # for HashRow and ArrayRow using the standard Sequel literalization callbacks, so
 # they work with on all adapters.
 #
-# The first thing you are going to want to do is to load the extension into
-# your Database object.  Make sure you load the :pg_array extension first
-# if you plan to use composite types in bound variables:
+# To use this extension, first load it into the Database instance:
+#
+#   DB.extension :pg_row
+#
+# If you plan to use arrays of composite types, make sure you load the
+# pg_array extension first:
 # 
-#   DB.extension(:pg_array, :pg_row)
+#   DB.extension :pg_array, :pg_row
 #
 # You can create an anonymous row type by calling the Sequel.pg_row with
 # an array:
 #
 #   Sequel.pg_row(array)
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Array#pg_row:
 #
 #   array.pg_row
@@ -59,12 +64,12 @@
 #
 # You can also use a hash:
 #
-#   DB.row_type(:address, :street=>'123 Sesame St.', :city=>'Some City', :zip=>'12345')
+#   DB.row_type(:address, street: '123 Sesame St.', city: 'Some City', zip: '12345')
 #
 # So if you have a person table that has an address column, here's how you
 # could insert into the column:
 #
-#   DB[:table].insert(:address=>DB.row_type(:address, :street=>'123 Sesame St.', :city=>'Some City', :zip=>'12345'))
+#   DB[:table].insert(address: DB.row_type(:address, street: '123 Sesame St.', city: 'Some City', zip: '12345'))
 #
 # Note that registering row types without providing an explicit :converter option
 # creates anonymous classes.  This results in ruby being unable to Marshal such
@@ -74,22 +79,19 @@
 #   DB.conversion_procs.select{|k,v| v.is_a?(Sequel::Postgres::PGRow::Parser) && \
 #     v.converter && (v.converter.name.nil? || v.converter.name == '') }.map{|k,v| v}
 # 
-# If you are not using the native postgres adapter and are using composite types
-# types as model column values you probably should use the
-# pg_typecast_on_load plugin if the column values are returned as a string.
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using row type columns in CREATE/ALTER TABLE statements.
 #
 # This extension requires both the strscan and delegate libraries.
+#
+# Related module: Sequel::Postgres::PGRow
 
 require 'delegate'
 require 'strscan'
-Sequel.require 'adapters/utils/pg_types'
 
 module Sequel
   module Postgres
     module PGRow
-      ROW = 'ROW'.freeze
-      CAST = '::'.freeze
-
       # Class for row-valued/composite types that are treated as arrays. By default,
       # this is only used for generic PostgreSQL record types, as registered
       # types use HashRow by default.
@@ -111,6 +113,7 @@ module Sequel
         # automatically casted to the database type when literalizing.
         def self.subclass(db_type)
           Class.new(self) do
+            Sequel.set_temp_name(self){"Sequel::Postgres::PGRow::ArrayRow::_Subclass(#{db_type})"}
             @db_type = db_type
           end
         end
@@ -127,11 +130,20 @@ module Sequel
 
         # Append SQL fragment related to this object to the sql.
         def sql_literal_append(ds, sql)
-          sql << ROW
+          sql << 'ROW'
           ds.literal_append(sql, to_a)
           if db_type
-            sql << CAST
+            sql << '::'
             ds.quote_schema_table_append(sql, db_type)
+          end
+        end
+
+        # Allow automatic parameterization if all values support it.
+        def sequel_auto_param_type(ds)
+          if db_type && all?{|v| nil == v || ds.send(:auto_param_type, v)}
+            s = String.new << "::"
+            ds.quote_schema_table_append(s, db_type)
+            s
           end
         end
       end
@@ -159,6 +171,7 @@ module Sequel
         # type and columns.
         def self.subclass(db_type, columns)
           Class.new(self) do
+            Sequel.set_temp_name(self){"Sequel::Postgres::PGRow::HashRow::_Subclass(#{db_type})"}
             @db_type = db_type
             @columns = columns
           end
@@ -199,16 +212,25 @@ module Sequel
         # Append SQL fragment related to this object to the sql.
         def sql_literal_append(ds, sql)
           check_columns!
-          sql << ROW
+          sql << 'ROW'
           ds.literal_append(sql, values_at(*columns))
           if db_type
-            sql << CAST
+            sql << '::'
             ds.quote_schema_table_append(sql, db_type)
+          end
+        end
+
+        # Allow automatic parameterization if all values support it.
+        def sequel_auto_param_type(ds)
+          if db_type && all?{|_,v| nil == v || ds.send(:auto_param_type, v)}
+            s = String.new << "::"
+            ds.quote_schema_table_append(s, db_type)
+            s
           end
         end
       end
 
-      ROW_TYPE_CLASSES = [HashRow, ArrayRow]
+      ROW_TYPE_CLASSES = [HashRow, ArrayRow].freeze
 
       # This parser-like class splits the PostgreSQL
       # row-valued/composite type output string format
@@ -217,33 +239,24 @@ module Sequel
       # will accept, it only handles the output format that
       # PostgreSQL uses.
       class Splitter < StringScanner
-        OPEN_PAREN = /\(/.freeze
-        CLOSE_PAREN = /\)/.freeze
-        UNQUOTED_RE = /[^,)]*/.freeze
-        SEP_RE = /[,)]/.freeze
-        QUOTE_RE = /"/.freeze
-        QUOTE_SEP_RE = /"[,)]/.freeze
-        QUOTED_RE = /(\\.|""|[^"])*/.freeze
-        REPLACE_RE = /\\(.)|"(")/.freeze
-        REPLACE_WITH = '\1\2'.freeze
-
         # Split the stored string into an array of strings, handling
         # the different types of quoting.
         def parse
-          return @result if @result
           values = []
-          skip(OPEN_PAREN)
-          if skip(CLOSE_PAREN)
+          skip(/\(/)
+          if skip(/\)/)
             values << nil
           else
+            # :nocov:
             until eos?
-              if skip(QUOTE_RE)
-                values << scan(QUOTED_RE).gsub(REPLACE_RE, REPLACE_WITH)
-                skip(QUOTE_SEP_RE)
+            # :nocov:
+              if skip(/"/)
+                values << scan(/(\\.|""|[^"])*/).gsub(/\\(.)|"(")/, '\1\2')
+                skip(/"[,)]/)
               else
-                v = scan(UNQUOTED_RE)
+                v = scan(/[^,)]*/)
                 values << (v unless v.empty?)
-                skip(SEP_RE)
+                skip(/[,)]/)
               end
             end
           end
@@ -370,10 +383,6 @@ module Sequel
       end
 
       module DatabaseMethods
-        ESCAPE_RE = /("|\\)/.freeze
-        ESCAPE_REPLACEMENT = '\\\\\1'.freeze
-        COMMA = ','.freeze
-
         # A hash mapping row type keys (usually symbols), to option
         # hashes.  At the least, the values will contain the :parser
         # option for the Parser instance that the type will use.
@@ -381,17 +390,14 @@ module Sequel
 
         # Do some setup for the data structures the module uses.
         def self.extended(db)
-          # Return right away if row_types has already been set. This
-          # makes things not break if a user extends the database with
-          # this module more than once (since extended is called every
-          # time).
-          return if db.row_types
-
-          db.instance_eval do
+          db.instance_exec do
             @row_types = {}
             @row_schema_types = {}
-            extend(@row_type_method_module = Module.new)
-            copy_conversion_procs([2249, 2287])
+            extend(@row_type_method_module = Sequel.set_temp_name(Module.new){"Sequel::Postgres::PGRow::DatabaseMethods::_RowTypeMethodModule"})
+            add_conversion_proc(2249, PGRow::Parser.new(:converter=>PGRow::ArrayRow))
+            if respond_to?(:register_array_type)
+              register_array_type('record', :oid=>2287, :scalar_oid=>2249)
+            end
           end
         end
 
@@ -399,13 +405,21 @@ module Sequel
         def bound_variable_arg(arg, conn)
           case arg
           when ArrayRow
-            "(#{arg.map{|v| bound_variable_array(v) if v}.join(COMMA)})"
+            "(#{arg.map{|v| bound_variable_array(v) if v}.join(',')})"
           when HashRow
             arg.check_columns!
-            "(#{arg.values_at(*arg.columns).map{|v| bound_variable_array(v) if v}.join(COMMA)})"
+            "(#{arg.values_at(*arg.columns).map{|v| bound_variable_array(v) if v}.join(',')})"
           else
             super
           end
+        end
+
+        # Freeze the row types and row schema types to prevent adding new ones.
+        def freeze
+          @row_types.freeze
+          @row_schema_types.freeze
+          @row_type_method_module.freeze
+          super
         end
 
         # Register a new row type for the Database instance. db_type should be the type
@@ -429,7 +443,7 @@ module Sequel
 
           # Get basic oid information for the composite type.
           ds = from(:pg_type).
-            select(:pg_type__oid, :typrelid, :typarray).
+            select{[pg_type[:oid], :typrelid, :typarray]}.
             where([[:typtype, 'c'], [:typname, type_name.to_s]])
           if type_schema
             ds = ds.join(:pg_namespace, [[:oid, :typnamespace], [:nspname, type_schema.to_s]])
@@ -442,7 +456,7 @@ module Sequel
           end
           # Manually cast to integer using to_i, because adapter may not cast oid type
           # correctly (e.g. swift)
-          parser_opts[:oid], rel_oid, array_oid = row.values_at(:oid, :typrelid, :typarray).map{|i| i.to_i}
+          parser_opts[:oid], rel_oid, array_oid = row.values_at(:oid, :typrelid, :typarray).map(&:to_i)
 
           # Get column names and oids for each of the members of the composite type.
           res = from(:pg_attribute).
@@ -451,7 +465,7 @@ module Sequel
             where{attnum > 0}.
             exclude(:attisdropped).
             order(:attnum).
-            select_map([:attname, Sequel.case({0=>:atttypid}, :pg_type__typbasetype, :pg_type__typbasetype).as(:atttypid)])
+            select_map{[:attname, Sequel.case({0=>:atttypid}, pg_type[:typbasetype], pg_type[:typbasetype]).as(:atttypid)]}
           if res.empty?
             raise Error, "no columns for row type #{db_type.inspect} in database"
           end
@@ -460,13 +474,7 @@ module Sequel
 
           # Using the conversion_procs, lookup converters for each member of the composite type
           parser_opts[:column_converters] = parser_opts[:column_oids].map do |oid|
-            if pr = procs[oid]
-              pr
-            elsif !Sequel::Postgres::STRING_TYPES.include?(oid)
-              # It's not a string type, and it's possible a conversion proc for this
-              # oid will be added later, so do a runtime check for it.
-              lambda{|s| (pr = procs[oid]) ? pr.call(s) : s}
-            end
+            procs[oid]
           end
 
           # Setup the converter and typecaster
@@ -474,18 +482,18 @@ module Sequel
           parser_opts[:typecaster] = opts.fetch(:typecaster, parser_opts[:converter])
 
           parser = Parser.new(parser_opts)
-          @conversion_procs[parser.oid] = parser
+          add_conversion_proc(parser.oid, parser)
 
-          if defined?(PGArray) && PGArray.respond_to?(:register) && array_oid && array_oid > 0
+          if respond_to?(:register_array_type) && array_oid && array_oid > 0
             array_type_name = if type_schema
               "#{type_schema}.#{type_name}"
             else
               type_name
             end
-            PGArray.register(array_type_name, :oid=>array_oid, :converter=>parser, :type_procs=>@conversion_procs, :scalar_typecast=>schema_type_symbol)
+            register_array_type(array_type_name, :oid=>array_oid, :converter=>parser, :scalar_typecast=>schema_type_symbol)
           end
 
-          @row_types[db_type] = opts.merge(:parser=>parser)
+          @row_types[literal(db_type)] = opts.merge(:parser=>parser, :type=>db_type)
           @row_schema_types[schema_type_string] = schema_type_symbol 
           @schema_type_classes[schema_type_symbol] = ROW_TYPE_CLASSES
           @row_type_method_module.class_eval do
@@ -494,28 +502,17 @@ module Sequel
               row_type(db_type, v)
             end
             private meth
+            alias_method(meth, meth)
           end
 
           nil
-        end
-
-        # When reseting conversion procs, reregister all the row types so that
-        # the system tables are introspected again, picking up database changes.
-        def reset_conversion_procs
-          procs = super
-
-          row_types.each do |db_type, opts|
-            register_row_type(db_type, opts)
-          end
-
-          procs
         end
 
         # Handle typecasting of the given object to the given database type.
         # In general, the given database type should already be registered,
         # but if obj is an array, this will handled unregistered types.
         def row_type(db_type, obj)
-          (type_hash = @row_types[db_type]) &&
+          (type_hash = @row_types[literal(db_type)]) &&
             (parser = type_hash[:parser])
 
           case obj
@@ -542,34 +539,11 @@ module Sequel
 
         private
 
-        # Format composite types used in bound variable arrays.
-        def bound_variable_array(arg)
-          case arg
-          when ArrayRow
-            "\"(#{arg.map{|v| bound_variable_array(v) if v}.join(COMMA).gsub(ESCAPE_RE, ESCAPE_REPLACEMENT)})\""
-          when HashRow
-            arg.check_columns!
-            "\"(#{arg.values_at(*arg.columns).map{|v| bound_variable_array(v) if v}.join(COMMA).gsub(ESCAPE_RE, ESCAPE_REPLACEMENT)})\""
-          else
-            super
-          end
-        end
-
         # Make the column type detection handle registered row types.
-        def schema_column_type(db_type)
-          if type = @row_schema_types[db_type]
-            type
-          else
-            super
-          end
+        def schema_composite_type(db_type)
+          @row_schema_types[db_type] || super
         end
       end
-    end
-
-    # Register the default anonymous record type
-    PG_TYPES[2249] = PGRow::Parser.new(:converter=>PGRow::ArrayRow)
-    if defined?(PGArray) && PGArray.respond_to?(:register)
-      PGArray.register('record', :oid=>2287, :scalar_oid=>2249)
     end
   end
 

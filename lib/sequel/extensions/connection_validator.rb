@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The connection_validator extension modifies a database's
 # connection pool to validate that connections checked out
 # from the pool are still valid, before yielding them for
@@ -26,26 +28,30 @@
 # connections on every checkout without setting up coarse
 # connection checkouts will hurt performance, in some cases
 # significantly.  Note that setting up coarse connection
-# checkouts reduces the concurrency level acheivable.  For
+# checkouts reduces the concurrency level achievable.  For
 # example, in a web application, using Database#synchronize
 # in a rack middleware will limit the number of concurrent
 # web requests to the number to connections in the database
 # connection pool.
 #
-# Note that this extension only affects the default threaded
-# and the sharded threaded connection pool.  The single
-# threaded and sharded single threaded connection pools are
-# not affected.  As the only reason to use the single threaded
+# Note that this extension does not work with the single
+# threaded and sharded single threaded connection pools.
+# As the only reason to use the single threaded
 # pools is for speed, and this extension makes the connection
 # pool slower, there's not much point in modifying this
 # extension to work with the single threaded pools.  The
-# threaded pools work fine even in single threaded code, so if
-# you are currently using a single threaded pool and want to
-# use this extension, switch to using a threaded pool.
+# non-single threaded pools work fine even in single threaded
+# code, so if you are currently using a single threaded pool
+# and want to use this extension, switch to using another
+# pool.
+#
+# Related module: Sequel::ConnectionValidator
 
+#
 module Sequel
   module ConnectionValidator
     class Retry < Error; end
+    Sequel::Deprecation.deprecate_constant(self, :Retry)
 
     # The number of seconds that need to pass since
     # connection checkin before attempting to validate
@@ -55,9 +61,16 @@ module Sequel
 
     # Initialize the data structures used by this extension.
     def self.extended(pool)
-      pool.instance_eval do
-        @connection_timestamps ||= {}
-        @connection_validation_timeout = 3600
+      case pool.pool_type
+      when :single, :sharded_single
+        raise Error, "cannot load connection_validator extension if using single or sharded_single connection pool"
+      end
+
+      pool.instance_exec do
+        sync do
+          @connection_timestamps ||= {}
+          @connection_validation_timeout ||= 3600
+        end
       end
 
       # Make sure the valid connection SQL query is precached,
@@ -72,8 +85,14 @@ module Sequel
     # Record the time the connection was checked back into the pool.
     def checkin_connection(*)
       conn = super
-      @connection_timestamps[conn] = Time.now
+      @connection_timestamps[conn] = Sequel.start_timer
       conn
+    end
+
+    # Clean up timestamps during disconnect.
+    def disconnect_connection(conn)
+      sync{@connection_timestamps.delete(conn)}
+      super
     end
 
     # When acquiring a connection, if it has been
@@ -81,23 +100,29 @@ module Sequel
     # test the connection for validity.  If it is not valid,
     # disconnect the connection, and retry with a new connection.
     def acquire(*a)
-      begin
+      conn = nil
+
+      1.times do
         if (conn = super) &&
-           (t = sync{@connection_timestamps.delete(conn)}) &&
-           Time.now - t > @connection_validation_timeout &&
-           !db.valid_connection?(conn)
+           (timer = sync{@connection_timestamps.delete(conn)}) &&
+           Sequel.elapsed_seconds_since(timer) > @connection_validation_timeout
 
-          if pool_type == :sharded_threaded
-            sync{allocated(a.last).delete(Thread.current)}
-          else
-            sync{@allocated.delete(Thread.current)}
+          begin
+            valid = db.valid_connection?(conn)
+          ensure
+            unless valid
+              case pool_type
+              when :sharded_threaded, :sharded_timed_queue
+                sync{@allocated[a.last].delete(Sequel.current)}
+              else
+                sync{@allocated.delete(Sequel.current)}
+              end
+
+              disconnect_connection(conn)
+              redo if valid == false
+            end
           end
-
-          db.disconnect_connection(conn)
-          raise Retry
         end
-      rescue Retry
-        retry
       end
 
       conn
@@ -106,4 +131,3 @@ module Sequel
 
   Database.register_extension(:connection_validator){|db| db.pool.extend(ConnectionValidator)}
 end
-

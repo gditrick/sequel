@@ -1,10 +1,10 @@
+# frozen-string-literal: true
+
 module Sequel
   class Model
     # Errors represents validation errors, a simple hash subclass
     # with a few convenience methods.
     class Errors < ::Hash
-      ATTRIBUTE_JOINER = ' and '.freeze
-
       # Adds an error for the given attribute.
       #
       #   errors.add(:name, 'is not valid') if name == 'invalid'
@@ -29,10 +29,16 @@ module Sequel
       #   errors.full_messages
       #   # => ['name is not valid',
       #   #     'hometown is not at least 2 letters']
+      #
+      # If the message is a Sequel::LiteralString, it will be used literally, without the column name:
+      #
+      #   errors.add(:name, Sequel.lit("Album name is not valid"))
+      #   errors.full_messages
+      #   # => ['Album name is not valid']
       def full_messages
         inject([]) do |m, kv| 
           att, errors = *kv
-          errors.each {|e| m << (e.is_a?(LiteralString) ? e : "#{Array(att).join(ATTRIBUTE_JOINER)} #{e}")}
+          errors.each {|e| m << (e.is_a?(LiteralString) ? e : full_message(att, e))}
           m
         end
       end
@@ -46,6 +52,15 @@ module Sequel
         if v = fetch(att, nil) and !v.empty?
           v
         end
+      end
+
+      private
+
+      # Create full error message to use for the given attribute (or array of attributes)
+      # and error message. This can be overridden for easier internalization.
+      def full_message(att, error_msg)
+        att = att.join(' and ') if att.is_a?(Array)
+        "#{att} #{error_msg}"
       end
     end
   end

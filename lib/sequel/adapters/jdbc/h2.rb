@@ -1,35 +1,50 @@
+# frozen-string-literal: true
+
+Sequel::JDBC.load_driver('Java::OrgH2::Driver', :H2)
+require_relative '../../extensions/auto_cast_date_and_time'
+
 module Sequel
   module JDBC
-    # Database and Dataset support for H2 databases accessed via JDBC.
+    Sequel.synchronize do
+      DATABASE_SETUP[:h2] = proc do |db|
+        db.extend(Sequel::JDBC::H2::DatabaseMethods)
+        db.dataset_class = Sequel::JDBC::H2::Dataset
+        Java::OrgH2::Driver
+      end
+    end
+
     module H2
-      # Instance methods for H2 Database objects accessed via JDBC.
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
-        PRIMARY_KEY_INDEX_RE = /\Aprimary_key/i.freeze
-      
-        # Commit an existing prepared transaction with the given transaction
-        # identifier string.
-        def commit_prepared_transaction(transaction_id)
-          run("COMMIT TRANSACTION #{transaction_id}")
+        include AutoCastDateAndTime
+
+        def commit_prepared_transaction(transaction_id, opts=OPTS)
+          run("COMMIT TRANSACTION #{transaction_id}", opts)
         end
 
-        # H2 uses the :h2 database type.
         def database_type
           :h2
         end
 
-        # Rollback an existing prepared transaction with the given transaction
-        # identifier string.
-        def rollback_prepared_transaction(transaction_id)
-          run("ROLLBACK TRANSACTION #{transaction_id}")
+        def freeze
+          h2_version
+          version2?
+          super
         end
 
-        # H2 uses an IDENTITY type
+        def h2_version
+          @h2_version ||= get(Sequel.function(:H2VERSION))
+        end
+
+        def rollback_prepared_transaction(transaction_id, opts=OPTS)
+          run("ROLLBACK TRANSACTION #{transaction_id}", opts)
+        end
+
+        # H2 uses an IDENTITY type for primary keys
         def serial_primary_key_options
           {:primary_key => true, :type => :identity, :identity=>true}
         end
 
-        # H2 supports CREATE TABLE IF NOT EXISTS syntax.
+        # H2 supports CREATE TABLE IF NOT EXISTS syntax
         def supports_create_table_if_not_exists?
           true
         end
@@ -46,27 +61,42 @@ module Sequel
         
         private
         
+        # H2 does not allow adding primary key constraints to NULLable columns.
+        def can_add_primary_key_constraint_on_nullable_columns?
+          false
+        end
+
         # If the :prepare option is given and we aren't in a savepoint,
         # prepare the transaction for a two-phase commit.
         def commit_transaction(conn, opts=OPTS)
-          if (s = opts[:prepare]) && _trans(conn)[:savepoint_level] <= 1
+          if (s = opts[:prepare]) && savepoint_level(conn) <= 1
             log_connection_execute(conn, "PREPARE COMMIT #{s}")
           else
             super
           end
         end
 
-        # H2 needs to add a primary key column as a constraint
         def alter_table_sql(table, op)
           case op[:op]
           when :add_column
             if (pk = op.delete(:primary_key)) || (ref = op.delete(:table))
+              if pk
+                op[:null] = false
+              end
+
               sqls = [super(table, op)]
-              sqls << "ALTER TABLE #{quote_schema_table(table)} ADD PRIMARY KEY (#{quote_identifier(op[:name])})" if pk
+
+              if pk && (h2_version >= '1.4' || op[:type] != :identity)
+                # H2 needs to add a primary key column as a constraint in this case
+                sqls << "ALTER TABLE #{quote_schema_table(table)} ADD PRIMARY KEY (#{quote_identifier(op[:name])})"
+              end
+
               if ref
                 op[:table] = ref
-                sqls << "ALTER TABLE #{quote_schema_table(table)} ADD FOREIGN KEY (#{quote_identifier(op[:name])}) #{column_references_sql(op)}"
+                constraint_name = op[:foreign_key_constraint_name]
+                sqls << "ALTER TABLE #{quote_schema_table(table)} ADD#{" CONSTRAINT #{quote_identifier(constraint_name)}" if constraint_name} FOREIGN KEY (#{quote_identifier(op[:name])}) #{column_references_sql(op)}"
               end
+
               sqls
             else
               super(table, op)
@@ -83,7 +113,7 @@ module Sequel
                 op = cs.merge!(op)
               end
             end
-            sql = "ALTER TABLE #{quote_schema_table(table)} ALTER COLUMN #{quote_identifier(op[:name])} #{type_literal(op)}"
+            sql = "ALTER TABLE #{quote_schema_table(table)} ALTER COLUMN #{quote_identifier(op[:name])} #{type_literal(op)}".dup
             column_definition_order.each{|m| send(:"column_definition_#{m}_sql", sql, op)}
             sql
           when :drop_constraint
@@ -114,18 +144,41 @@ module Sequel
           DATABASE_ERROR_REGEXPS
         end
 
-        # Use IDENTITY() to get the last inserted id.
+        def execute_statement_insert(stmt, sql)
+          stmt.executeUpdate(sql, JavaSQL::Statement::RETURN_GENERATED_KEYS)
+        end
+
+        def prepare_jdbc_statement(conn, sql, opts)
+          opts[:type] == :insert ? conn.prepareStatement(sql, JavaSQL::Statement::RETURN_GENERATED_KEYS) : super
+        end
+
+        # Get the last inserted id using getGeneratedKeys, scope_identity, or identity.
         def last_insert_id(conn, opts=OPTS)
-          statement(conn) do |stmt|
-            sql = 'SELECT IDENTITY();'
-            rs = log_yield(sql){stmt.executeQuery(sql)}
-            rs.next
-            rs.getInt(1)
+          if stmt = opts[:stmt]
+            rs = stmt.getGeneratedKeys
+            begin
+              if rs.next
+                begin
+                  rs.getLong(1)
+                rescue
+                  rs.getObject(1) rescue nil
+                end
+              end
+            ensure
+              rs.close
+            end
+          elsif !version2?
+            statement(conn) do |stmt|
+              sql = 'SELECT IDENTITY()'
+              rs = log_connection_yield(sql, conn){stmt.executeQuery(sql)}
+              rs.next
+              rs.getLong(1)
+            end
           end
         end
         
         def primary_key_index_re
-          PRIMARY_KEY_INDEX_RE
+          /\Aprimary_key/i
         end
 
         # H2 does not support named column constraints.
@@ -133,44 +186,37 @@ module Sequel
           false
         end
 
-        # Use BIGINT IDENTITY for identity columns that use bigint, fixes
-        # the case where primary_key :column, :type=>Bignum is used.
-        def type_literal_generic_bignum(column)
-          column[:identity] ? 'BIGINT IDENTITY' : super
+        # Use BIGINT IDENTITY for identity columns that use :Bignum type
+        def type_literal_generic_bignum_symbol(column)
+          column[:identity] ? 'BIGINT AUTO_INCREMENT' : super
+        end
+
+        def version2?
+          return @version2 if defined?(@version2)
+          @version2 = h2_version.to_i >= 2
         end
       end
       
-      # Dataset class for H2 datasets accessed via JDBC.
       class Dataset < JDBC::Dataset
-        SELECT_CLAUSE_METHODS = clause_methods(:select, %w'select distinct columns from join where group having compounds order limit')
-        BITWISE_METHOD_MAP = {:& =>:BITAND, :| => :BITOR, :^ => :BITXOR}
-        APOS = Dataset::APOS
-        HSTAR = "H*".freeze
-        BITCOMP_OPEN = "((0 - ".freeze
-        BITCOMP_CLOSE = ") - 1)".freeze
         ILIKE_PLACEHOLDER = ["CAST(".freeze, " AS VARCHAR_IGNORECASE)".freeze].freeze
-        TIME_FORMAT = "'%H:%M:%S'".freeze
-        
+
         # Emulate the case insensitive LIKE operator and the bitwise operators.
         def complex_expression_sql_append(sql, op, args)
           case op
           when :ILIKE, :"NOT ILIKE"
-            super(sql, (op == :ILIKE ? :LIKE : :"NOT LIKE"), [SQL::PlaceholderLiteralString.new(ILIKE_PLACEHOLDER, [args.at(0)]), args.at(1)])
-          when :&, :|, :^
-            sql << complex_expression_arg_pairs(args){|a, b| literal(SQL::Function.new(BITWISE_METHOD_MAP[op], a, b))}
-          when :<<
-            sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} * POWER(2, #{literal(b)}))"}
-          when :>>
-            sql << complex_expression_arg_pairs(args){|a, b| "(#{literal(a)} / POWER(2, #{literal(b)}))"}
-          when :'B~'
-            sql << BITCOMP_OPEN
-            literal_append(sql, args.at(0))
-            sql << BITCOMP_CLOSE
+            super(sql, (op == :ILIKE ? :LIKE : :"NOT LIKE"), [SQL::PlaceholderLiteralString.new(ILIKE_PLACEHOLDER, [args[0]]), args[1]])
+          when :&, :|, :^, :<<, :>>, :'B~'
+            complex_expression_emulate_append(sql, op, args)
           else
             super
           end
         end
         
+        # H2 does not support derived column lists
+        def supports_derived_column_lists?
+          false
+        end
+
         # H2 requires SQL standard datetimes
         def requires_sql_standard_datetimes?
           true
@@ -186,6 +232,11 @@ module Sequel
           false
         end
         
+        # H2 supports MERGE
+        def supports_merge?
+          true
+        end
+
         # H2 doesn't support multiple columns in IN/NOT IN
         def supports_multiple_column_in?
           false
@@ -193,35 +244,45 @@ module Sequel
 
         private
 
-        #JAVA_H2_CLOB = Java::OrgH2Jdbc::JdbcClob
-
-        class ::Sequel::JDBC::Dataset::TYPE_TRANSLATOR
-          def h2_clob(v) v.getSubString(1, v.length) end
-        end
-
-        H2_CLOB_METHOD = TYPE_TRANSLATOR_INSTANCE.method(:h2_clob)
-      
-        # Handle H2 specific clobs as strings.
-        def convert_type_proc(v)
-          if v.is_a?(Java::OrgH2Jdbc::JdbcClob)
-            H2_CLOB_METHOD
-          else
-            super
-          end
-        end
-        
         # H2 expects hexadecimal strings for blob values
         def literal_blob_append(sql, v)
-          sql << APOS << v.unpack(HSTAR).first << APOS
-        end
-        
-        # H2 handles fractional seconds in timestamps, but not in times
-        def literal_sqltime(v)
-          v.strftime(TIME_FORMAT)
+          if db.send(:version2?)
+            super
+          else
+            sql << "'" << v.unpack("H*").first << "'"
+          end
         end
 
-        def select_clause_methods
-          SELECT_CLAUSE_METHODS
+        def literal_false
+          'FALSE'
+        end
+        
+        def literal_true
+          'TRUE'
+        end
+
+        # H2 handles fractional seconds in timestamps, but not in times
+        def literal_sqltime(v)
+          v.strftime("'%H:%M:%S'")
+        end
+
+        # H2 supports multiple rows in INSERT.
+        def multi_insert_sql_strategy
+          :values
+        end
+
+        def select_only_offset_sql(sql)
+          if db.send(:version2?)
+            super
+          else
+            sql << " LIMIT -1 OFFSET "
+            literal_append(sql, @opts[:offset])
+          end
+        end
+
+        # H2 supports quoted function names.
+        def supports_quoted_function_names?
+          true
         end
       end
     end

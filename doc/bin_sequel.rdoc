@@ -10,9 +10,7 @@ This is very useful for quick testing of ideas, and does not affect the environm
 
 If you've installed the sequel gem, then just running "sequel" should load the program, since rubygems should place the sequel binary in your load path.  However, if you want to run bin/sequel from the root of a repository checkout, you should probably do:
 
-  ruby -I lib bin/sequel
-
-The -I lib makes sure that you are using the repository checkout's code.
+  ruby bin/sequel
 
 == Choosing the Database to Connect to
 
@@ -24,7 +22,7 @@ In general, you probably want to provide a connection string argument to bin/seq
   sequel postgres://user:pass@host/database_name
   sequel mysql2://user:pass@host/database_name
 
-See the {Connecting to a database guide}[link:files/doc/opening_databases_rdoc.html] for more details about and examples of connection strings.
+See the {Connecting to a database guide}[rdoc-ref:doc/opening_databases.rdoc] for more details about and examples of connection strings.
 
 === YAML Connection File
 
@@ -77,7 +75,7 @@ You can use the -M attribute to set the version to migrate to:
 
   sequel -m /path/to/migrations/dir -M 3 postgres://host/database
 
-See the {migration guide}[link:files/doc/migration_rdoc.html] for more details about migrations.
+See the {migration guide}[rdoc-ref:doc/migration.rdoc] for more details about migrations.
 
 === Dump Schemas
 
@@ -91,6 +89,8 @@ To save this information to a file, use a standard shell redirection:
 
 The -d option dumps the migration in database-independent format, the -D option dumps it in database-specific format.
 
+Note that the support for dumping schema is fairly limited.  It doesn't handle database views, functions, triggers, schemas, partial indexes, functional indexes, and many other things.  You should probably use the database specific tools to handle those.
+
 The -S option dumps the schema cache for all tables in the database, which can speed up the usage of Sequel with models when using the schema_caching extension.  You should provide this option with the path to which to dump the schema:
 
   sequel -S /path/to/schema_cache.db postgres://host/database
@@ -102,6 +102,8 @@ Using the -C option, Sequel can copy the contents of one database to another, ev
   sequel -C mysql://host1/database postgres://host2/database2
 
 This copies the table structure, table data, indexes, and foreign keys from the MySQL database to the PostgreSQL database.
+
+Note that the support for copying is fairly limited.  It doesn't handle database views, functions, triggers, schemas, partial indexes, functional indexes, and many other things. Also, the data type conversion may not be exactly what you want.  It is best designed for quick conversions and testing.  For serious production use, use the database's tools to copy databases for the same database type, and for different database types, use the Sequel API.
 
 == Other Options
 

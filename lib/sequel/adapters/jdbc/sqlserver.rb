@@ -1,14 +1,51 @@
-Sequel.require 'adapters/jdbc/mssql'
+# frozen-string-literal: true
+
+Sequel::JDBC.load_driver('Java::ComMicrosoftSqlserverJdbc::SQLServerDriver')
+require_relative 'mssql'
 
 module Sequel
   module JDBC
-    # Database and Dataset instance methods for SQLServer specific
-    # support via JDBC.
+    Sequel.synchronize do
+      DATABASE_SETUP[:sqlserver] = proc do |db|
+        db.extend(Sequel::JDBC::SQLServer::DatabaseMethods)
+        db.extend_datasets Sequel::MSSQL::DatasetMethods
+        db.send(:set_mssql_unicode_strings)
+        Java::ComMicrosoftSqlserverJdbc::SQLServerDriver
+      end
+    end
+
     module SQLServer
-      # Database instance methods for SQLServer databases accessed via JDBC.
+      MSSQL_RUBY_TIME = Object.new
+      def MSSQL_RUBY_TIME.call(r, i)
+        # MSSQL-Server TIME should be fetched as string to keep the precision intact, see:
+        # https://docs.microsoft.com/en-us/sql/t-sql/data-types/time-transact-sql#a-namebackwardcompatibilityfordownlevelclientsa-backward-compatibility-for-down-level-clients
+        if v = r.getString(i)
+          Sequel.string_to_time("#{v}")
+        end
+      end
+
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::JDBC::MSSQL::DatabaseMethods
+
+        def setup_type_convertor_map
+          super
+          map = @type_convertor_map
+          map[Java::JavaSQL::Types::TIME] = MSSQL_RUBY_TIME
+
+          # Work around constant lazy loading in some drivers
+          begin
+            dto = Java::MicrosoftSql::Types::DATETIMEOFFSET
+          rescue NameError
+          end
+
+          if dto
+            map[dto] = lambda do |r, i|
+              if v = r.getDateTimeOffset(i)
+                to_application_timestamp(v.to_s)
+              end
+            end
+          end
+        end
 
         # Work around a bug in SQL Server JDBC Driver 3.0, where the metadata
         # for the getColumns result set specifies an incorrect type for the
@@ -19,48 +56,32 @@ module Sequel
         # than getObject() for this column avoids the problem.
         # Reference: http://social.msdn.microsoft.com/Forums/en/sqldataaccess/thread/20df12f3-d1bf-4526-9daa-239a83a8e435
         module MetadataDatasetMethods
-          def process_result_set_convert(cols, result)
-            while result.next
-              row = {}
-              cols.each do |n, i, p|
-                v = (n == :is_autoincrement ? result.getString(i) : result.getObject(i))
-                row[n] = if v
-                  if p
-                    p.call(v)
-                  elsif p.nil?
-                    cols[i-1][2] = p = convert_type_proc(v)
-                    if p
-                      p.call(v)
-                    else
-                      v
-                    end
-                  else
-                    v
-                  end
-                else
-                  v
-                end
-              end
-              yield row
+          def type_convertor(map, meta, type, i)
+            if output_identifier(meta.getColumnLabel(i)) == :is_autoincrement
+              map[Java::JavaSQL::Types::VARCHAR]
+            else
+              super
             end
           end
 
-          def process_result_set_no_convert(cols, result)
-            while result.next
-              row = {}
-              cols.each do |n, i|
-                row[n] = (n == :is_autoincrement ? result.getString(i) : result.getObject(i))
-              end
-              yield row
+          def basic_type_convertor(map, meta, type, i)
+            if output_identifier(meta.getColumnLabel(i)) == :is_autoincrement
+              map[Java::JavaSQL::Types::VARCHAR]
+            else
+              super
             end
           end
         end
         
-        def metadata_dataset
-          super.extend(MetadataDatasetMethods)
+        private
+
+        def _metadata_dataset
+          super.with_extend(MetadataDatasetMethods)
         end
 
-        private
+        def database_exception_use_sqlstates?
+          false
+        end
 
         def disconnect_error?(exception, opts)
           super || (exception.message =~ /connection is closed/)

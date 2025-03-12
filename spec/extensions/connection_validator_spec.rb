@@ -1,13 +1,16 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
-shared_examples_for "Sequel::ConnectionValidator" do  
+connection_validator_specs = Module.new do
+  extend Minitest::Spec::DSL
   before do
-    @db.extend(Module.new do
+    @db = db
+    @m = Module.new do
       def disconnect_connection(conn)
         @sqls << 'disconnect'
       end
       def valid_connection?(conn)
         super
+        raise if conn.valid == :exception
         conn.valid
       end
       def connect(server)
@@ -18,37 +21,58 @@ shared_examples_for "Sequel::ConnectionValidator" do
         conn.valid = true
         conn
       end
-    end)
+    end
+    @db.extend @m
     @db.extension(:connection_validator)
   end
 
   it "should still allow new connections" do
-    @db.synchronize{|c| c}.should be_a_kind_of(Sequel::Mock::Connection)
+    @db.synchronize{|c| c}.must_be_kind_of(Sequel::Mock::Connection)
   end
 
   it "should only validate if connection idle longer than timeout" do
     c1 = @db.synchronize{|c| c}
-    @db.sqls.should == []
-    @db.synchronize{|c| c}.should equal(c1)
-    @db.sqls.should == []
+    @db.sqls.must_equal []
+    @db.synchronize{|c| c}.must_be_same_as(c1)
+    @db.sqls.must_equal []
     @db.pool.connection_validation_timeout = -1
-    @db.synchronize{|c| c}.should equal(c1)
-    @db.sqls.should == ['SELECT NULL']
+    @db.synchronize{|c| c}.must_be_same_as(c1)
+    @db.sqls.must_equal ['SELECT NULL']
     @db.pool.connection_validation_timeout = 1
-    @db.synchronize{|c| c}.should equal(c1)
-    @db.sqls.should == []
-    @db.synchronize{|c| c}.should equal(c1)
-    @db.sqls.should == []
+    @db.synchronize{|c| c}.must_be_same_as(c1)
+    @db.sqls.must_equal []
+    @db.synchronize{|c| c}.must_be_same_as(c1)
+    @db.sqls.must_equal []
   end
 
   it "should disconnect connection if not valid" do
     c1 = @db.synchronize{|c| c}
-    @db.sqls.should == []
+    @db.sqls.must_equal []
     c1.valid = false
     @db.pool.connection_validation_timeout = -1
     c2 = @db.synchronize{|c| c}
-    @db.sqls.should == ['SELECT NULL', 'disconnect']
-    c2.should_not equal(c1)
+    @db.sqls.must_equal ['SELECT NULL', 'disconnect']
+    c2.wont_be_same_as(c1)
+  end
+
+  it "should assume that exceptions raised during valid_connection mean the connection is not valid" do
+    c1 = @db.synchronize{|c| c}
+    @db.sqls.must_equal []
+    c1.valid = :exception
+    @db.pool.connection_validation_timeout = -1
+    proc{@db.synchronize{}}.must_raise RuntimeError
+    @db.sqls.must_equal ['SELECT NULL', 'disconnect']
+    c2 = @db.synchronize{|c| c}
+    c2.wont_be_same_as(c1)
+  end
+
+  it "should handle Database#disconnect calls while the connection is checked out" do
+    @db.synchronize{|c| @db.disconnect}
+  end
+
+  it "should handle disconnected connections" do
+    proc{@db.synchronize{|c| raise Sequel::DatabaseDisconnectError}}.must_raise Sequel::DatabaseDisconnectError
+    @db.sqls.must_equal ['disconnect']
   end
 
   it "should disconnect multiple connections repeatedly if they are not valid" do
@@ -72,47 +96,96 @@ shared_examples_for "Sequel::ConnectionValidator" do
     c2.valid = false
 
     c3 = @db.synchronize{|c| c}
-    @db.sqls.should == ['SELECT NULL', 'disconnect', 'SELECT NULL', 'disconnect']
-    c3.should_not equal(c1)
-    c3.should_not equal(c2)
+    @db.sqls.must_equal ['SELECT NULL', 'disconnect', 'SELECT NULL', 'disconnect']
+    c3.wont_be_same_as(c1)
+    c3.wont_be_same_as(c2)
+  end
+
+  it "should not leak connection references during disconnect" do
+    @db.synchronize{}
+    @db.pool.instance_variable_get(:@connection_timestamps).size.must_equal 1
+    @db.disconnect
+    @db.pool.instance_variable_get(:@connection_timestamps).size.must_equal 0
   end
 
   it "should not leak connection references" do
     c1 = @db.synchronize do |c|
-      @db.pool.instance_variable_get(:@connection_timestamps).should == {}
+      @db.pool.instance_variable_get(:@connection_timestamps).must_equal({})
       c
     end
-    @db.pool.instance_variable_get(:@connection_timestamps).should have_key(c1)
+    @db.pool.instance_variable_get(:@connection_timestamps).must_include(c1)
 
     c1.valid = false
     @db.pool.connection_validation_timeout = -1
     c2 = @db.synchronize do |c|
-      @db.pool.instance_variable_get(:@connection_timestamps).should == {}
+      @db.pool.instance_variable_get(:@connection_timestamps).must_equal({})
       c
     end
-    c2.should_not equal(c1)
-    @db.pool.instance_variable_get(:@connection_timestamps).should_not have_key(c1)
-    @db.pool.instance_variable_get(:@connection_timestamps).should have_key(c2)
+    c2.wont_be_same_as(c1)
+    @db.pool.instance_variable_get(:@connection_timestamps).wont_include(c1)
+    @db.pool.instance_variable_get(:@connection_timestamps).must_include(c2)
   end
 
   it "should handle case where determining validity requires a connection" do
-    @db.meta_def(:valid_connection?){|c| synchronize{}; true}
+    def @db.valid_connection?(c) synchronize{}; true end
     @db.pool.connection_validation_timeout = -1
     c1 = @db.synchronize{|c| c}
-    @db.synchronize{|c| c}.should equal(c1)
+    @db.synchronize{|c| c}.must_be_same_as(c1)
+  end
+end
+
+threaded_connection_validator_specs = Module.new do
+  extend Minitest::Spec::DSL
+
+  it "should handle :connection_handling => :disconnect setting" do
+    @db = Sequel.mock(@db.opts.merge(:connection_handling => :disconnect))
+    @db.extend @m
+    @db.extension(:connection_validator)
+    @db.synchronize{}
+    @db.sqls.must_equal ['disconnect']
+  end
+end
+
+describe "Sequel::ConnectionValidator with single threaded pool" do
+  it "should raise an error if trying to load the connection_validator extension into a single connection pool" do
+    db = Sequel.mock(:test=>false, :pool_class=>:single)
+    proc{db.extension(:connection_validator)}.must_raise Sequel::Error
+  end
+end
+
+describe "Sequel::ConnectionValidator with sharded single threaded pool" do
+  it "should raise an error if trying to load the connection_validator extension into a single connection pool" do
+    db = Sequel.mock(:test=>false, :pool_class=>:sharded_single)
+    proc{db.extension(:connection_validator)}.must_raise Sequel::Error
   end
 end
 
 describe "Sequel::ConnectionValidator with threaded pool" do
-  before do
-    @db = Sequel.mock
+  def db
+    Sequel.mock(:test=>false, :pool_class=>:threaded)
   end
-  it_should_behave_like "Sequel::ConnectionValidator"
-end
-describe "Sequel::ConnectionValidator with sharded threaded pool" do
-  before do
-    @db = Sequel.mock(:servers=>{})
-  end
-  it_should_behave_like "Sequel::ConnectionValidator"
+  include connection_validator_specs
+  include threaded_connection_validator_specs
 end
 
+describe "Sequel::ConnectionValidator with sharded threaded pool" do
+  def db
+    Sequel.mock(:test=>false, :servers=>{}, :pool_class=>:sharded_threaded)
+  end
+  include connection_validator_specs
+  include threaded_connection_validator_specs
+end
+
+describe "Sequel::ConnectionValidator with timed_queue pool" do
+  def db
+    Sequel.mock(:test=>false, :pool_class=>:timed_queue)
+  end
+  include connection_validator_specs
+end if RUBY_VERSION >= '3.2'
+
+describe "Sequel::ConnectionValidator with sharded_timed_queue pool" do
+  def db
+    Sequel.mock(:test=>false, :pool_class=>:sharded_timed_queue)
+  end
+  include connection_validator_specs
+end if RUBY_VERSION >= '3.2'

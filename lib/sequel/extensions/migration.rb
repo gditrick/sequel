@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # Adds the Sequel::Migration and Sequel::Migrator classes, which allow
 # the user to easily group schema changes and migrate the database
 # to a newer version or revert to a previous version.
@@ -5,7 +7,12 @@
 # To load the extension:
 #
 #   Sequel.extension :migration
+#
+# Related modules: Sequel::Migration, Sequel::SimpleMigration,
+# Sequel::MigrationDSL, Sequel::MigrationReverser, Sequel::MigrationAlterTableReverser,
+# Sequel::Migrator, Sequel::IntegerMigrator, Sequel::TimestampMigrator
 
+#
 module Sequel
   # Sequel's older migration class, available for backward compatibility.
   # Uses subclasses with up and down instance methods for each migration:
@@ -34,7 +41,7 @@ module Sequel
     # direction.
     def self.apply(db, direction)
       raise(ArgumentError, "Invalid migration direction specified (#{direction.inspect})") unless [:up, :down].include?(direction)
-      new(db).send(direction)
+      new(db).public_send(direction)
     end
 
     # Returns the list of Migration descendants.
@@ -58,8 +65,12 @@ module Sequel
     
     # Intercepts method calls intended for the database and sends them along.
     def method_missing(method_sym, *args, &block)
+      # Allow calling private methods for backwards compatibility
       @db.send(method_sym, *args, &block)
     end
+    # :nocov:
+    ruby2_keywords(:method_missing) if respond_to?(:ruby2_keywords, true)
+    # :nocov:
 
     # This object responds to all methods the database responds to.
     def respond_to_missing?(meth, include_private)
@@ -92,29 +103,29 @@ module Sequel
     end
 
     # Apply the appropriate block on the +Database+
-    # instance using instance_eval.
+    # instance using instance_exec.
     def apply(db, direction)
       raise(ArgumentError, "Invalid migration direction specified (#{direction.inspect})") unless [:up, :down].include?(direction)
-      if prok = send(direction)
-        db.instance_eval(&prok)
+      if prok = public_send(direction)
+        db.instance_exec(&prok)
       end
     end
   end
 
   # Internal class used by the Sequel.migration DSL, part of the +migration+ extension.
   class MigrationDSL < BasicObject
-    # The underlying Migration instance
+    # The underlying SimpleMigration instance
     attr_reader :migration
 
     def self.create(&block)
       new(&block).migration
     end
 
-    # Create a new migration class, and instance_eval the block.
+    # Create a new migration class, and instance_exec the block.
     def initialize(&block)
       @migration = SimpleMigration.new
       Migration.descendants << migration
-      instance_eval(&block)
+      instance_exec(&block)
     end
 
     # Defines the migration's down action.
@@ -143,10 +154,23 @@ module Sequel
     # the block.
     #
     # There are no guarantees that this will work perfectly
-    # in all cases, but it should work for most common cases.
+    # in all cases, but it works for some simple cases.
     def change(&block)
       migration.up = block
       migration.down = MigrationReverser.new.reverse(&block)
+    end
+
+    # Creates a revert migration.  This is the same as creating
+    # the same block with +down+, but it also calls the block and attempts
+    # to create a +up+ block that will reverse the changes made by
+    # the block.  This is designed to revert the changes in the
+    # provided block.
+    #
+    # There are no guarantees that this will work perfectly
+    # in all cases, but it works for some simple cases.
+    def revert(&block)
+      migration.down = block
+      migration.up = MigrationReverser.new.reverse(&block)
     end
   end
 
@@ -163,22 +187,19 @@ module Sequel
     # the given block.
     def reverse(&block)
       begin
-        instance_eval(&block)
+        instance_exec(&block)
       rescue
         just_raise = true
       end
       if just_raise
-        Proc.new{raise Sequel::Error, 'irreversible migration method used, you may need to write your own down method'}
+        Proc.new{raise Sequel::Error, "irreversible migration method used in #{block.source_location.first}, you may need to write your own down method"}
       else
         actions = @actions.reverse
         Proc.new do
           actions.each do |a|
-            if a.last.is_a?(Proc)
-              pr = a.pop
-              send(*a, &pr)
-            else
-              send(*a)
-            end
+            pr = a.last.is_a?(Proc) ? a.pop : nil
+            # Allow calling private methods as the reversing methods are private
+            send(*a, &pr)
           end
         end
       end
@@ -202,12 +223,12 @@ module Sequel
       @actions << [:drop_join_table, *args]
     end
 
-    def create_table(*args)
-      @actions << [:drop_table, args.first]
+    def create_table(name, opts=OPTS, &_)
+      @actions << [:drop_table, name, opts]
     end
 
-    def create_view(*args)
-      @actions << [:drop_view, args.first]
+    def create_view(name, _, opts=OPTS)
+      @actions << [:drop_view, name, opts]
     end
 
     def rename_column(table, name, new_name)
@@ -226,8 +247,9 @@ module Sequel
     end
 
     def reverse(&block)
-      instance_eval(&block)
+      instance_exec(&block)
       actions = @actions.reverse
+      # Allow calling private methods as the reversing methods are private
       Proc.new{actions.each{|a| send(*a)}}
     end
 
@@ -238,7 +260,9 @@ module Sequel
     end
 
     def add_constraint(*args)
-      @actions << [:drop_constraint, args.first]
+      name = args.first
+      name = name.is_a?(Hash) ? name[:name] : name
+      @actions << [:drop_constraint, name]
     end
 
     def add_foreign_key(key, table, *args)
@@ -258,6 +282,10 @@ module Sequel
 
     def rename_column(name, new_name)
       @actions << [:rename_column, new_name, name]
+    end
+
+    def set_column_allow_null(name, allow_null=true)
+      @actions << [:set_column_allow_null, name, !allow_null]
     end
   end
 
@@ -321,30 +349,32 @@ module Sequel
   # schema_migrations for timestamped migrations). in the database to keep track
   # of the current migration version. If no migration version is stored in the
   # database, the version is considered to be 0. If no target version is 
-  # specified, the database is migrated to the latest version available in the
+  # specified, or the target version specified is greater than the latest
+  # version available, the database is migrated to the latest version available in the
   # migration directory.
   #
   # For example, to migrate the database to the latest version:
   #
-  #   Sequel::Migrator.apply(DB, '.')
+  #   Sequel::Migrator.run(DB, '.')
   #
   # For example, to migrate the database all the way down:
   #
-  #   Sequel::Migrator.apply(DB, '.', 0)
+  #   Sequel::Migrator.run(DB, '.', target: 0)
   #
   # For example, to migrate the database to version 4:
   #
-  #   Sequel::Migrator.apply(DB, '.', 4)
+  #   Sequel::Migrator.run(DB, '.', target: 4)
   #
   # To migrate the database from version 1 to version 5:
   #
-  #   Sequel::Migrator.apply(DB, '.', 5, 1)
+  #   Sequel::Migrator.run(DB, '.', target: 5, current: 1)
   #
   # Part of the +migration+ extension.
   class Migrator
-    MIGRATION_FILE_PATTERN = /\A(\d+)_.+\.rb\z/i.freeze
-    MIGRATION_SPLITTER = '_'.freeze
-    MINIMUM_TIMESTAMP = 20000101
+    MIGRATION_FILE_PATTERN = /\A(\d+)_(.+)\.rb\z/i.freeze
+
+    # Mutex used around migration file loading
+    MUTEX = Mutex.new
 
     # Exception class raised when there is an error with the migrator's
     # file structure, database, or arguments.
@@ -364,7 +394,7 @@ module Sequel
     # Raise a NotCurrentError unless the migrator is current, takes the same
     # arguments as #run.
     def self.check_current(*args)
-      raise(NotCurrentError, 'migrator is not current') unless is_current?(*args)
+      raise(NotCurrentError, 'current migration version does not match latest available version') unless is_current?(*args)
     end
 
     # Return whether the migrator is current (i.e. it does not need to make
@@ -373,31 +403,48 @@ module Sequel
       migrator_class(directory).new(db, directory, opts).is_current?
     end
 
-    # Migrates the supplied database using the migration files in the the specified directory. Options:
+    # Lock ID to use for advisory locks when running migrations
+    # "sequel-migration".codepoints.reduce(:*) % (2**63)
+    MIGRATION_ADVISORY_LOCK_ID = 4966325471869609408
+    private_constant :MIGRATION_ADVISORY_LOCK_ID
+
+    # Migrates the supplied database using the migration files in the specified directory. Options:
     # :allow_missing_migration_files :: Don't raise an error if there are missing migration files.
+    #                                   It is very risky to use this option, since it can result in
+    #                                   the database schema version number not matching the expected
+    #                                   database schema.
     # :column :: The column in the :table argument storing the migration version (default: :version).
     # :current :: The current version of the database.  If not given, it is retrieved from the database
     #             using the :table and :column options.
-    # :table :: The table containing the schema version (default: :schema_info).
+    # :relative :: Run the given number of migrations, with a positive number being migrations to migrate
+    #              up, and a negative number being migrations to migrate down (IntegerMigrator only).
+    # :table :: The table containing the schema version (default: :schema_info for integer migrations and
+    #           :schema_migrations for timestamped migrations).
     # :target :: The target version to which to migrate.  If not given, migrates to the maximum version.
+    # :use_advisory_lock :: Use advisory locks in migrations (only use this if Sequel supports advisory
+    #                       locks for the database).
     #
     # Examples: 
     #   Sequel::Migrator.run(DB, "migrations")
-    #   Sequel::Migrator.run(DB, "migrations", :target=>15, :current=>10)
-    #   Sequel::Migrator.run(DB, "app1/migrations", :column=> :app2_version)
-    #   Sequel::Migrator.run(DB, "app2/migrations", :column => :app2_version, :table=>:schema_info2)
+    #   Sequel::Migrator.run(DB, "migrations", target: 15, current: 10)
+    #   Sequel::Migrator.run(DB, "app1/migrations", column: :app2_version)
+    #   Sequel::Migrator.run(DB, "app2/migrations", column: :app2_version, table: :schema_info2)
     def self.run(db, directory, opts=OPTS)
-      migrator_class(directory).new(db, directory, opts).run
+      if opts[:use_advisory_lock]
+        db.with_advisory_lock(MIGRATION_ADVISORY_LOCK_ID){run(db, directory, opts.merge(:use_advisory_lock=>false))}
+      else
+        migrator_class(directory).new(db, directory, opts).run
+      end
     end
 
     # Choose the Migrator subclass to use.  Uses the TimestampMigrator
-    # if the version number appears to be a unix time integer for a year
-    # after 2005, otherwise uses the IntegerMigrator.
+    # if the version number is greater than 20000101, otherwise uses the IntegerMigrator.
     def self.migrator_class(directory)
       if self.equal?(Migrator)
+        raise(Error, "Must supply a valid migration path") unless File.directory?(directory)
         Dir.new(directory).each do |file|
           next unless MIGRATION_FILE_PATTERN.match(file)
-          return TimestampMigrator if file.split(MIGRATION_SPLITTER, 2).first.to_i > MINIMUM_TIMESTAMP
+          return TimestampMigrator if file.split('_', 2).first.to_i > 20000101
         end
         IntegerMigrator
       else
@@ -437,9 +484,9 @@ module Sequel
       @directory = directory
       @allow_missing_migration_files = opts[:allow_missing_migration_files]
       @files = get_migration_files
-      schema, table = @db.send(:schema_and_table, opts[:table]  || self.class.const_get(:DEFAULT_SCHEMA_TABLE))
+      schema, table = @db.send(:schema_and_table, opts[:table] || default_schema_table)
       @table = schema ? Sequel::SQL::QualifiedIdentifier.new(schema, table) : table
-      @column = opts[:column] || self.class.const_get(:DEFAULT_SCHEMA_COLUMN)
+      @column = opts[:column] || default_schema_column
       @ds = schema_dataset
       @use_transactions = opts[:use_transactions]
     end
@@ -459,26 +506,27 @@ module Sequel
         @use_transactions
       end
 
-      if use_trans
-        db.transaction(&block)
-      else
-        yield
-      end
+      db.transaction(:skip_transaction=>use_trans == false, &block)
     end
 
-    # Remove all migration classes.  Done by the migrator to ensure that
-    # the correct migration classes are picked up.
-    def remove_migration_classes
-      # Remove class definitions
-      Migration.descendants.each do |c|
-        Object.send(:remove_const, c.to_s) rescue nil
+    # Load the migration file, raising an exception if the file does not define
+    # a single migration.
+    def load_migration_file(file)
+      MUTEX.synchronize do
+        n = Migration.descendants.length
+        load(file)
+        raise Error, "Migration file #{file.inspect} not containing a single migration detected" unless n + 1 == Migration.descendants.length
+        c = Migration.descendants.pop
+        if c.is_a?(Class) && !c.name.to_s.empty? && Object.const_defined?(c.name)
+          Object.send(:remove_const, c.name)
+        end
+        c
       end
-      Migration.descendants.clear # remove any defined migration classes
     end
 
     # Return the integer migration version based on the filename.
     def migration_version_from_file(filename)
-      filename.split(MIGRATION_SPLITTER, 2).first.to_i
+      filename.split('_', 2).first.to_i
     end
   end
 
@@ -486,9 +534,6 @@ module Sequel
   # version number starting with 1, where missing or duplicate migration file
   # versions are not allowed.  Part of the +migration+ extension.
   class IntegerMigrator < Migrator
-    DEFAULT_SCHEMA_COLUMN = :version
-    DEFAULT_SCHEMA_TABLE = :schema_info
-
     Error = Migrator::Error
 
     # The current version for this migrator
@@ -503,13 +548,31 @@ module Sequel
     # Set up all state for the migrator instance
     def initialize(db, directory, opts=OPTS)
       super
-      @target = opts[:target] || latest_migration_version
       @current = opts[:current] || current_migration_version
 
-      raise(Error, "No current version available") unless current
-      raise(Error, "No target version available, probably because no migration files found or filenames don't follow the migration filename convention") unless target
+      latest_version = latest_migration_version
+      @target = if opts[:target]
+        opts[:target]
+      elsif opts[:relative]
+        @current + opts[:relative]
+      else
+        latest_version
+      end
+
+      raise(Error, "No target and/or latest version available, probably because no migration files found or filenames don't follow the migration filename convention") unless target && latest_version
+
+      if @target > latest_version
+        @target = latest_version
+      elsif @target < 0
+        @target = 0
+      end
 
       @direction = current < target ? :up : :down
+
+      if @direction == :down && @current >= @files.length && !@allow_missing_migration_files
+        raise Migrator::Error, "Missing migration version(s) needed to migrate down to target version (current: #{current}, target: #{target})"
+      end
+
       @migrations = get_migrations
     end
 
@@ -521,14 +584,13 @@ module Sequel
     # Apply all migrations on the database
     def run
       migrations.zip(version_numbers).each do |m, v|
-        t = Time.now
-        lv = up? ? v : v + 1
-        db.log_info("Begin applying migration version #{lv}, direction: #{direction}")
+        timer = Sequel.start_timer
+        db.log_info("Begin applying migration version #{v}, direction: #{direction}")
         checked_transaction(m) do
           m.apply(db, direction)
-          set_migration_version(v)
+          set_migration_version(up? ? v : v-1)
         end
-        db.log_info("Finished applying migration version #{lv}, direction: #{direction}, took #{sprintf('%0.6f', Time.now - t)} seconds")
+        db.log_info("Finished applying migration version #{v}, direction: #{direction}, took #{sprintf('%0.6f', Sequel.elapsed_seconds_since(timer))} seconds")
       end
       
       target
@@ -540,6 +602,16 @@ module Sequel
     # number is stored, 0 is returned.
     def current_migration_version
       ds.get(column) || 0
+    end
+
+    # The default column storing schema version.
+    def default_schema_column
+      :version
+    end
+
+    # The default table storing schema version.
+    def default_schema_table
+      :schema_info
     end
 
     # Returns any found migration files in the supplied directory.
@@ -561,14 +633,7 @@ module Sequel
     # Returns a list of migration classes filtered for the migration range and
     # ordered according to the migration direction.
     def get_migrations
-      remove_migration_classes
-
-      # load migration files
-      files[up? ? (current + 1)..target : (target + 1)..current].compact.each{|f| load(f)}
-      
-      # get migration classes
-      classes = Migration.descendants
-      up? ? classes : classes.reverse
+      version_numbers.map{|n| load_migration_file(files[n])}
     end
     
     # Returns the latest version available in the specified directory.
@@ -591,7 +656,7 @@ module Sequel
       ds
     end
     
-    # Sets the current migration  version stored in the database.
+    # Sets the current migration version stored in the database.
     def set_migration_version(version)
       ds.update(column=>version)
     end
@@ -605,19 +670,24 @@ module Sequel
     # so that each number in the array is the migration version
     # that will be in affect after the migration is run.
     def version_numbers
-      up? ? ((current+1)..target).to_a : (target..(current - 1)).to_a.reverse
+      @version_numbers ||= begin
+        versions = files.
+          compact.
+          map{|f| migration_version_from_file(File.basename(f))}.
+          select{|v| up? ? (v > current && v <= target) : (v <= current && v > target)}.
+          sort
+        versions.reverse! unless up?
+        versions
+      end
     end
   end
 
-  # The migrator used if any migration file version appears to be a timestamp.
+  # The migrator used if any migration file version is greater than 20000101.
   # Stores filenames of migration files, and can figure out which migrations
   # have not been applied and apply them, even if earlier migrations are added
   # after later migrations.  If you plan to do that, the responsibility is on
   # you to make sure the migrations don't conflict. Part of the +migration+ extension.
   class TimestampMigrator < Migrator
-    DEFAULT_SCHEMA_COLUMN = :filename
-    DEFAULT_SCHEMA_TABLE = :schema_migrations
-    
     Error = Migrator::Error
 
     # Array of strings of applied migration filenames
@@ -634,6 +704,13 @@ module Sequel
       @migration_tuples = get_migration_tuples
     end
 
+    # Apply the migration in the given file path.  See Migrator.run for the
+    # available options.  Additionally, this method supports the :direction
+    # option for whether to run the migration up (default) or down.
+    def self.run_single(db, path, opts=OPTS)
+      new(db, File.dirname(path), opts).run_single(path, opts[:direction] || :up)
+    end
+
     # The timestamp migrator is current if there are no migrations to apply
     # in either direction.
     def is_current?
@@ -643,24 +720,43 @@ module Sequel
     # Apply all migration tuples on the database
     def run
       migration_tuples.each do |m, f, direction|
-        t = Time.now
-        db.log_info("Begin applying migration #{f}, direction: #{direction}")
-        checked_transaction(m) do
-          m.apply(db, direction)
-          fi = f.downcase
-          direction == :up ? ds.insert(column=>fi) : ds.filter(column=>fi).delete
-        end
-        db.log_info("Finished applying migration #{f}, direction: #{direction}, took #{sprintf('%0.6f', Time.now - t)} seconds")
+        apply_migration(m, f, direction)
       end
+      nil
+    end
+
+    # Apply single migration tuple at the given path with the given direction
+    # on the database.
+    def run_single(path, direction)
+      migration = load_migration_file(path)
+      file_name = File.basename(path)
+      already_applied = applied_migrations.include?(file_name.downcase)
+
+      return if direction == :up ? already_applied : !already_applied
+
+      apply_migration(migration, file_name, direction)
       nil
     end
 
     private
 
+    # Apply a single migration with the given filename in the given direction.
+    def apply_migration(migration, file_name, direction)
+      fi = file_name.downcase
+      t = Time.now
+
+      db.log_info("Begin applying migration #{file_name}, direction: #{direction}")
+      checked_transaction(migration) do
+        migration.apply(db, direction)
+        direction == :up ? ds.insert(column=>fi) : ds.where(column=>fi).delete
+      end
+      db.log_info("Finished applying migration #{file_name}, direction: #{direction}, took #{sprintf('%0.6f', Time.now - t)} seconds")
+    end
+
     # Convert the schema_info table to the new schema_migrations table format,
     # using the version of the schema_info table and the current migration files.
     def convert_from_schema_info
-      v = db[IntegerMigrator::DEFAULT_SCHEMA_TABLE].get(IntegerMigrator::DEFAULT_SCHEMA_COLUMN)
+      v = db[:schema_info].get(:version)
       ds = db.from(table)
       files.each do |path|
         f = File.basename(path)
@@ -668,6 +764,16 @@ module Sequel
           ds.insert(column=>f)
         end
       end
+    end
+
+    # The default column storing migration filenames.
+    def default_schema_column
+      :filename
+    end
+
+    # The default table storing migration filenames.
+    def default_schema_table
+      :schema_migrations
     end
 
     # Returns filenames of all applied migrations
@@ -685,31 +791,42 @@ module Sequel
         next unless MIGRATION_FILE_PATTERN.match(file)
         files << File.join(directory, file)
       end
-      files.sort_by{|f| MIGRATION_FILE_PATTERN.match(File.basename(f))[1].to_i}
+      files.sort! do |a, b|
+        a_ver, a_name = split_migration_filename(a)
+        b_ver, b_name = split_migration_filename(b)
+        x = a_ver <=> b_ver
+        if x.zero?
+          x = a_name <=> b_name
+        end
+        x
+      end
+      files
+    end
+
+    # Return an integer and name (without extension) for the given path.
+    def split_migration_filename(path)
+      version, name = MIGRATION_FILE_PATTERN.match(File.basename(path)).captures
+      version = version.to_i
+      [version, name]
     end
     
     # Returns tuples of migration, filename, and direction
     def get_migration_tuples
-      remove_migration_classes
       up_mts = []
       down_mts = []
-      ms = Migration.descendants
       files.each do |path|
         f = File.basename(path)
         fi = f.downcase
         if target
           if migration_version_from_file(f) > target
             if applied_migrations.include?(fi)
-              load(path)
-              down_mts << [ms.last, f, :down]
+              down_mts << [load_migration_file(path), f, :down]
             end
           elsif !applied_migrations.include?(fi)
-            load(path)
-            up_mts << [ms.last, f, :up]
+            up_mts << [load_migration_file(path), f, :up]
           end
         elsif !applied_migrations.include?(fi)
-          load(path)
-          up_mts << [ms.last, f, :up]
+          up_mts << [load_migration_file(path), f, :up]
         end
       end
       up_mts + down_mts.reverse
@@ -721,7 +838,18 @@ module Sequel
       c = column
       ds = db.from(table)
       if !db.table_exists?(table)
-        db.create_table(table){String c, :primary_key=>true}
+        begin
+          db.create_table(table){String c, :primary_key=>true}
+        rescue Sequel::DatabaseError => e
+          if db.database_type == :mysql && e.message =~ /max key length/
+            # Handle case where MySQL is used with utf8mb4 charset default, which
+            # only allows a maximum length of about 190 characters for string
+            # primary keys due to InnoDB limitations.
+            db.create_table(table){String c, :primary_key=>true, :size=>190}
+          else
+            raise e
+          end
+        end
         if db.table_exists?(:schema_info) and vha = db[:schema_info].all and vha.length == 1 and
            vha.first.keys == [:version] and vha.first.values.first.is_a?(Integer)
           convert_from_schema_info

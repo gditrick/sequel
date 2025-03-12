@@ -1,6 +1,14 @@
-# The query extension adds Sequel::Dataset#query which allows
+# frozen-string-literal: true
+#
+# The query extension adds a query method which allows
 # a different way to construct queries instead of the usual
-# method chaining.  See Sequel::Dataset#query for details.
+# method chaining:
+#
+#   dataset = DB[:items].query do
+#     select :x, :y, :z
+#     where{(x > 1) & (y > 2)}
+#     reverse :z
+#   end
 #
 # You can load this extension into specific datasets:
 #
@@ -11,7 +19,11 @@
 # is probably the desired behavior if you are using this extension:
 #
 #   DB.extension(:query)
+#
+# Related modules: Sequel::DatabaseQuery, Sequel::DatasetQuery,
+# Sequel::Dataset::Query
 
+#
 module Sequel
   module DatabaseQuery
     def self.extended(db)
@@ -25,24 +37,22 @@ module Sequel
   end
 
   module DatasetQuery
-    Dataset.def_mutation_method(:query, :module=>self)
-
     # Translates a query block into a dataset. Query blocks are an
     # alternative to Sequel's usual method chaining, by using
-    # instance_eval with a proxy object:
+    # instance_exec with a proxy object:
     #
     #   dataset = DB[:items].query do
     #     select :x, :y, :z
-    #     filter{(x > 1) & (y > 2)}
+    #     where{(x > 1) & (y > 2)}
     #     reverse :z
     #   end
     #
     # Which is the same as:
     #
-    #  dataset = DB[:items].select(:x, :y, :z).filter{(x > 1) & (y > 2)}.reverse(:z)
+    #  dataset = DB[:items].select(:x, :y, :z).where{(x > 1) & (y > 2)}.reverse(:z)
     def query(&block)
       query = Dataset::Query.new(self)
-      query.instance_eval(&block)
+      query.instance_exec(&block)
       query.dataset
     end
   end
@@ -59,10 +69,14 @@ module Sequel
 
       # Replace the query's dataset with dataset returned by the method call.
       def method_missing(method, *args, &block)
+        # Allow calling private methods, so things like raise works
         @dataset = @dataset.send(method, *args, &block)
         raise(Sequel::Error, "method #{method.inspect} did not return a dataset") unless @dataset.is_a?(Dataset)
         self
       end
+      # :nocov:
+      ruby2_keywords(:method_missing) if respond_to?(:ruby2_keywords, true)
+      # :nocov:
     end
   end
 

@@ -1,9 +1,11 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
-    # Sequel's built-in hook class methods plugin is designed for backwards
+    # Sequel's built-in hook_class_methods plugin is designed for backwards
     # compatibility.  Its use is not encouraged, it is recommended to use
-    # instance methods and super instead of this plugin.  What this plugin
-    # allows you to do is, for example:
+    # instance methods and super instead of this plugin.  This plugin allows
+    # calling class methods with blocks to define hooks:
     #
     #   # Block only, can cause duplicate hooks if code is reloaded
     #   before_save{self.created_at = Time.now}
@@ -13,17 +15,14 @@ module Sequel
     #   before_save(:set_created_at)
     #
     # Pretty much anything you can do with a hook class method, you can also
-    # do with an instance method instead:
+    # do with an instance method instead (making sure to call super), which is
+    # the recommended way to add hooks in Sequel:
     #
     #    def before_save
-    #      return false if super == false
+    #      super
     #      self.created_at = Time.now
     #    end
     #
-    # Note that returning false in any before hook block will skip further
-    # before hooks and abort the action.  So if a before_save hook block returns
-    # false, future before_save hook blocks are not called, and the save is aborted.
-    # 
     # Usage:
     #
     #   # Allow use of hook class methods in all model subclasses (called before loading subclasses)
@@ -39,46 +38,18 @@ module Sequel
       end
 
       module ClassMethods
-        Model::HOOKS.each{|h| class_eval("def #{h}(method = nil, &block); add_hook(:#{h}, method, &block) end", __FILE__, __LINE__)}
+        Model::HOOKS.each do |h|
+          class_eval(<<-END, __FILE__, __LINE__ + 1)
+            def #{h}(method = nil, &block)
+              add_hook(:#{h}, method, &block)
+            end
+          END
+        end
 
-        # This adds a new hook type. It will define both a class
-        # method that you can use to add hooks, as well as an instance method
-        # that you can use to call all hooks of that type.  The class method
-        # can be called with a symbol or a block or both.  If a block is given and
-        # and symbol is not, it adds the hook block to the hook type.  If a block
-        # and symbol are both given, it replaces the hook block associated with
-        # that symbol for a given hook type, or adds it if there is no hook block
-        # with that symbol for that hook type.  If no block is given, it assumes
-        # the symbol specifies an instance method to call and adds it to the hook
-        # type.
-        #
-        # If any before hook block returns false, the instance method will return false
-        # immediately without running the rest of the hooks of that type.
-        #
-        # It is recommended that you always provide a symbol to this method,
-        # for descriptive purposes.  It's only necessary to do so when you 
-        # are using a system that reloads code.
-        # 
-        # Example of usage:
-        #
-        #  class MyModel
-        #   define_hook :before_move_to
-        #   before_move_to(:check_move_allowed){|o| o.allow_move?}
-        #   def move_to(there)
-        #     return if before_move_to == false
-        #     # move MyModel object to there
-        #   end
-        #  end
-        #
-        # Do not call this method with untrusted input, as that can result in
-        # arbitrary code execution.
-        def add_hook_type(*hooks)
-          Model::HOOKS.concat(hooks)
-          hooks.each do |hook|
-            @hooks[hook] = []
-            instance_eval("def #{hook}(method = nil, &block); add_hook(:#{hook}, method, &block) end", __FILE__, __LINE__)
-            class_eval("def #{hook}; model.hook_blocks(:#{hook}){|b| return false if instance_eval(&b) == false}; end", __FILE__, __LINE__)
-          end
+        # Freeze hooks when freezing model class.
+        def freeze
+          @hooks.freeze.each_value(&:freeze)
+          super
         end
     
         # Returns true if there are any hook blocks for the given hook.
@@ -88,7 +59,14 @@ module Sequel
     
         # Yield every block related to the given hook.
         def hook_blocks(hook)
-          @hooks[hook].each{|k,v| yield v}
+          # SEQUEL6: Remove
+          Sequel::Deprecation.deprecate("The hook_blocks class method in the hook_class_methods plugin is deprecated and will be removed in Sequel 6.")
+          @hooks[hook].each{|_,v,_| yield v}
+        end
+
+        # Yield every method related to the given hook.
+        def hook_methods_for(hook)
+          @hooks[hook].each{|_,_,m| yield m}
         end
 
         Plugins.inherited_instance_variables(self, :@hooks=>:hash_dup)
@@ -101,24 +79,31 @@ module Sequel
         def add_hook(hook, tag, &block)
           unless block
             (raise Error, 'No hook method specified') unless tag
-            block = proc {send tag}
+            # Allow calling private hook methods
+            block = proc {send(tag)}
           end
+
           h = @hooks[hook]
+
           if tag && (old = h.find{|x| x[0] == tag})
             old[1] = block
+            Plugins.def_sequel_method(self, old[2], 0, &block)
           else
+            meth = Plugins.def_sequel_method(self, "validation_class_methods_#{hook}", 0, &block)
             if hook.to_s =~ /^before/
-              h.unshift([tag,block])
+              h.unshift([tag, block, meth])
             else
-              h << [tag, block]
+              h << [tag, block, meth]
             end
           end
         end
       end
 
       module InstanceMethods
-        Model::BEFORE_HOOKS.each{|h| class_eval("def #{h}; model.hook_blocks(:#{h}){|b| return false if instance_eval(&b) == false}; super; end", __FILE__, __LINE__)}
-        Model::AFTER_HOOKS.each{|h| class_eval("def #{h}; super; model.hook_blocks(:#{h}){|b| instance_eval(&b)}; end", __FILE__, __LINE__)}
+        # hook methods are private
+        [:before_create, :before_update, :before_validation, :before_save, :before_destroy].each{|h| class_eval("def #{h}; model.hook_methods_for(:#{h}){|m| send(m)}; super end", __FILE__, __LINE__)}
+
+        [:after_create, :after_update, :after_validation, :after_save, :after_destroy].each{|h| class_eval("def #{h}; super; model.hook_methods_for(:#{h}){|m| send(m)}; end", __FILE__, __LINE__)}
       end
     end
   end

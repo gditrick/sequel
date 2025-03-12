@@ -1,14 +1,16 @@
+# frozen-string-literal: true
+
 # A ShardedSingleConnectionPool is a single threaded connection pool that
 # works with multiple shards/servers.
 class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
   # The single threaded pool takes the following options:
   #
-  # * :servers - A hash of servers to use.  Keys should be symbols.  If not
-  #   present, will use a single :default server.
-  # * :servers_hash - The base hash to use for the servers.  By default,
-  #   Sequel uses Hash.new(:default).  You can use a hash with a default proc
-  #   that raises an error if you want to catch all cases where a nonexistent
-  #   server is used.
+  # :servers :: A hash of servers to use.  Keys should be symbols.  If not
+  #             present, will use a single :default server.
+  # :servers_hash :: The base hash to use for the servers.  By default,
+  #                  Sequel uses Hash.new(:default).  You can use a hash with a default proc
+  #                  that raises an error if you want to catch all cases where a nonexistent
+  #                  server is used.
   def initialize(db, opts=OPTS)
     super
     @conns = {}
@@ -17,9 +19,9 @@ class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
     add_servers(opts[:servers].keys) if opts[:servers]
   end
   
-  # Adds new servers to the connection pool. Primarily used in conjunction with master/slave
-  # or shard configurations. Allows for dynamic expansion of the potential slaves/shards
-  # at runtime. servers argument should be an array of symbols. 
+  # Adds new servers to the connection pool. Primarily used in conjunction with primary/replica
+  # or sharded configurations. Allows for dynamic expansion of the potential replicas/shards
+  # at runtime. +servers+ argument should be an array of symbols. 
   def add_servers(servers)
     servers.each{|s| @servers[s] = s}
   end
@@ -36,26 +38,36 @@ class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
   
   # Disconnects from the database. Once a connection is requested using
   # #hold, the connection is reestablished. Options:
-  # * :server - Should be a symbol specifing the server to disconnect from,
-  #   or an array of symbols to specify multiple servers.
+  # :server :: Should be a symbol specifing the server to disconnect from,
+  #            or an array of symbols to specify multiple servers.
   def disconnect(opts=OPTS)
-    (opts[:server] ? Array(opts[:server]) : servers).each{|s| disconnect_server(s)}
+    (opts[:server] ? Array(opts[:server]) : servers).each do |s|
+      raise Sequel::Error, "invalid server: #{s}" unless @servers.has_key?(s)
+      disconnect_server(s)
+    end
+  end
+
+  def freeze
+    @servers.freeze
+    super
   end
   
   # Yields the connection to the supplied block for the given server.
   # This method simulates the ConnectionPool#hold API.
   def hold(server=:default)
-    begin
-      server = pick_server(server)
-      yield(@conns[server] ||= make_new(server))
-    rescue Sequel::DatabaseDisconnectError
-      disconnect_server(server)
-      raise
-    end
+    server = pick_server(server)
+    yield(@conns[server] ||= make_new(server))
+  rescue Sequel::DatabaseDisconnectError, *@error_classes => e
+    disconnect_server(server) if disconnect_error?(e)
+    raise
   end
   
-  # Remove servers from the connection pool. Primarily used in conjunction with master/slave
-  # or shard configurations.  Similar to disconnecting from all given servers,
+  # The ShardedSingleConnectionPool always has a maximum size of 1.
+  def max_size
+    1
+  end
+  
+  # Remove servers from the connection pool. Similar to disconnecting from all given servers,
   # except that after it is used, future requests for the server will use the
   # :default server instead.
   def remove_servers(servers)
@@ -85,7 +97,7 @@ class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
   # Disconnect from the given server, if connected.
   def disconnect_server(server)
     if conn = @conns.delete(server)
-      db.disconnect_connection(conn)
+      disconnect_connection(conn)
     end
   end
 
@@ -94,5 +106,8 @@ class Sequel::ShardedSingleConnectionPool < Sequel::ConnectionPool
     @servers[server]
   end
   
-  CONNECTION_POOL_MAP[[true, true]] = self
+  # Make sure there is a valid connection for each server.
+  def preconnect(concurrent = nil)
+    servers.each{|s| hold(s){}}
+  end
 end

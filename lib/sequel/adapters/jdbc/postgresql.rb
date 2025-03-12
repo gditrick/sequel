@@ -1,18 +1,22 @@
-Sequel.require 'adapters/shared/postgres'
+# frozen-string-literal: true
+
+Sequel::JDBC.load_driver('Java::OrgPostgresql::Driver', :Postgres)
+require_relative '../shared/postgres'
 
 module Sequel
-  Postgres::CONVERTED_EXCEPTIONS << NativeException
-  
   module JDBC
-    # Adapter, Database, and Dataset support for accessing a PostgreSQL
-    # database via JDBC.
+    Sequel.synchronize do
+      DATABASE_SETUP[:postgresql] = proc do |db|
+        db.dataset_class = Sequel::JDBC::Postgres::Dataset
+        db.extend(Sequel::JDBC::Postgres::DatabaseMethods)
+        Java::OrgPostgresql::Driver
+      end
+    end
+
     module Postgres
-      # Methods to add to Database instances that access PostgreSQL via
-      # JDBC.
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::Postgres::DatabaseMethods
-        
+
         # Add the primary_keys and primary_key_sequences instance variables,
         # so we can get the correct return values for inserted rows.
         def self.extended(db)
@@ -20,30 +24,40 @@ module Sequel
           db.send(:initialize_postgres_adapter)
         end
 
+        # Remove any current entry for the oid in the oid_convertor_map.
+        def add_conversion_proc(oid, *)
+          super
+          Sequel.synchronize{@oid_convertor_map.delete(oid)}
+        end
+
         # See Sequel::Postgres::Adapter#copy_into
         def copy_into(table, opts=OPTS)
           data = opts[:data]
           data = Array(data) if data.is_a?(String)
 
-          if block_given? && data
+          if defined?(yield) && data
             raise Error, "Cannot provide both a :data option and a block to copy_into"
-          elsif !block_given? && !data
+          elsif !defined?(yield) && !data
             raise Error, "Must provide either a :data option or a block to copy_into"
           end
 
-          synchronize(opts) do |conn|
+          synchronize(opts[:server]) do |conn|
             begin
-              copy_manager = org.postgresql.copy.CopyManager.new(conn)
+              copy_manager = Java::OrgPostgresqlCopy::CopyManager.new(conn)
               copier = copy_manager.copy_in(copy_into_sql(table, opts))
-              if block_given?
+              if defined?(yield)
                 while buf = yield
-                  copier.writeToCopy(buf.to_java_bytes, 0, buf.length)
+                  java_bytes = buf.to_java_bytes
+                  copier.writeToCopy(java_bytes, 0, java_bytes.length)
                 end
               else
-                data.each { |d| copier.writeToCopy(d.to_java_bytes, 0, d.length) }
+                data.each do |d|
+                  java_bytes = d.to_java_bytes
+                  copier.writeToCopy(java_bytes, 0, java_bytes.length)
+                end
               end
             rescue Exception => e
-              copier.cancelCopy
+              copier.cancelCopy if copier
               raise
             ensure
               unless e
@@ -60,29 +74,89 @@ module Sequel
         # See Sequel::Postgres::Adapter#copy_table
         def copy_table(table, opts=OPTS)
           synchronize(opts[:server]) do |conn|
-            copy_manager = org.postgresql.copy.CopyManager.new(conn)
+            copy_manager = Java::OrgPostgresqlCopy::CopyManager.new(conn)
             copier = copy_manager.copy_out(copy_table_sql(table, opts))
             begin
-              if block_given?
+              if defined?(yield)
                 while buf = copier.readFromCopy
                   yield(String.from_java_bytes(buf))
                 end
                 nil
               else
-                b = ''
+                b = String.new
                 while buf = copier.readFromCopy
                   b << String.from_java_bytes(buf)
                 end
                 b
               end
+            rescue => e
+              raise_error(e, :disconnect=>true)
             ensure
-              raise DatabaseDisconnectError, "disconnecting as a partial COPY may leave the connection in an unusable state" if buf
+              if buf && !e
+                raise DatabaseDisconnectError, "disconnecting as a partial COPY may leave the connection in an unusable state"
+              end
             end
           end
         end
 
+        def oid_convertor_proc(oid)
+          if (conv = Sequel.synchronize{@oid_convertor_map[oid]}).nil?
+            conv = if pr = conversion_procs[oid]
+              lambda do |r, i|
+                if v = r.getString(i)
+                  pr.call(v)
+                end
+              end
+            else
+              false
+            end
+            Sequel.synchronize{@oid_convertor_map[oid] = conv}
+          end
+          conv
+        end
+
         private
         
+        def disconnect_error?(exception, opts)
+          super || exception.message =~ /\A(This connection has been closed\.|FATAL: terminating connection due to administrator command|An I\/O error occurred while sending to the backend\.)\z/
+        end
+
+        # For PostgreSQL-specific types, return the string that should be used
+        # as the PGObject value. Returns nil by default, loading pg_* extensions
+        # will override this to add support for specific types.
+        def bound_variable_arg(arg, conn)
+          nil
+        end
+
+        # Work around issue when using Sequel's bound variable support where the
+        # same SQL is used in different bound variable calls, but the schema has
+        # changed between the calls.  This is necessary as jdbc-postgres versions
+        # after 9.4.1200 violate the JDBC API.  These versions cache separate
+        # PreparedStatement instances, which are eventually prepared server side after the
+        # prepareThreshold is met.  The JDBC API violation is that PreparedStatement#close
+        # does not release the server side prepared statement.
+        def prepare_jdbc_statement(conn, sql, opts)
+          ps = super
+          unless opts[:name]
+            ps.prepare_threshold = 0
+          end
+          ps
+        end
+
+        # If the given argument is a recognized PostgreSQL-specific type, create
+        # a PGObject instance with unknown type and the bound argument string value,
+        # and set that as the prepared statement argument.
+        def set_ps_arg(cps, arg, i)
+          if v = bound_variable_arg(arg, nil)
+            obj = Java::OrgPostgresqlUtil::PGobject.new
+            obj.setType("unknown")
+            obj.setValue(v)
+            cps.setObject(i, obj)
+          else
+            super
+          end
+        end
+
         # Use setNull for nil arguments as the default behavior of setString
         # with nil doesn't appear to work correctly on PostgreSQL.
         def set_ps_arg_nil(cps, i)
@@ -90,98 +164,74 @@ module Sequel
         end
 
         # Execute the connection configuration SQL queries on the connection.
-        def setup_connection(conn)
-          conn = super(conn)
+        def setup_connection_with_opts(conn, opts)
+          conn = super
           statement(conn) do |stmt|
-            connection_configuration_sqls.each{|sql| log_yield(sql){stmt.execute(sql)}}
+            connection_configuration_sqls(opts).each{|sql| log_connection_yield(sql, conn){stmt.execute(sql)}}
           end
           conn
         end
+
+        def setup_type_convertor_map
+          super
+          @oid_convertor_map = {}
+        end
       end
       
-      # Dataset subclass used for datasets that connect to PostgreSQL via JDBC.
       class Dataset < JDBC::Dataset
         include Sequel::Postgres::DatasetMethods
-        APOS = Dataset::APOS
+
+        # Warn when calling as the fetch size is ignored by the JDBC adapter currently.
+        def with_fetch_size(size)
+          warn("Sequel::JDBC::Postgres::Dataset#with_fetch_size does not currently have an effect.", :uplevel=>1)
+          super
+        end
         
-        class ::Sequel::JDBC::Dataset::TYPE_TRANSLATOR
-          # Convert Java::OrgPostgresqlUtil::PGobject to ruby strings
-          def pg_object(v)
-            v.to_string
-          end
-        end
-
-        # Handle conversions of PostgreSQL array instances
-        class PGArrayConverter
-          # Set the method that will return the correct conversion
-          # proc for elements of this array.
-          def initialize(meth)
-            @conversion_proc_method = meth
-            @conversion_proc = nil
-          end
-          
-          # Convert Java::OrgPostgresqlJdbc4::Jdbc4Array to ruby arrays
-          def call(v)
-            _pg_array(v.array)
-          end
-
-          private
-
-          # Handle multi-dimensional Java arrays by recursively mapping them
-          # to ruby arrays of ruby values.
-          def _pg_array(v)
-            v.to_ary.map do |i|
-              if i.respond_to?(:to_ary)
-                _pg_array(i)
-              elsif i
-                if @conversion_proc.nil?
-                  @conversion_proc = @conversion_proc_method.call(i)
-                end
-                if @conversion_proc
-                  @conversion_proc.call(i)
-                else
-                  i
-                end
-              else
-                i
-              end
-            end
-          end
-        end
-
-        PG_OBJECT_METHOD = TYPE_TRANSLATOR_INSTANCE.method(:pg_object)
-      
-        # Add the shared PostgreSQL prepared statement methods
-        def prepare(type, name=nil, *values)
-          ps = to_prepared_statement(type, values)
-          ps.extend(JDBC::Dataset::PreparedStatementMethods)
-          ps.extend(::Sequel::Postgres::DatasetMethods::PreparedStatementMethods)
-          if name
-            ps.prepared_statement_name = name
-            db.set_prepared_statement(name, ps)
-          end
-          ps
-        end
-
         private
-        
-        # Handle PostgreSQL array and object types. Object types are just
-        # turned into strings, similarly to how the native adapter treats
-        # the types.
-        def convert_type_proc(v)
-          case v
-          when Java::OrgPostgresqlJdbc4::Jdbc4Array
-            PGArrayConverter.new(method(:convert_type_proc))
-          when Java::OrgPostgresqlUtil::PGobject
-            PG_OBJECT_METHOD
-          else
-            super
-          end
-        end
         
         # Literalize strings similar to the native postgres adapter
         def literal_string_append(sql, v)
-          sql << APOS << db.synchronize(@opts[:server]){|c| c.escape_string(v)} << APOS
+          sql << "'" << db.synchronize(@opts[:server]){|c| c.escape_string(v)} << "'"
+        end
+
+        # SQL fragment for Sequel::SQLTime, containing just the time part
+        def literal_sqltime(v)
+          v.strftime("'%H:%M:%S#{sprintf(".%03d", (v.usec/1000.0).round)}'")
+        end
+
+        INTEGER_TYPE = Java::JavaSQL::Types::INTEGER
+        STRING_TYPE = Java::JavaSQL::Types::VARCHAR
+        ARRAY_TYPE = Java::JavaSQL::Types::ARRAY
+        PG_SPECIFIC_TYPES = [Java::JavaSQL::Types::ARRAY, Java::JavaSQL::Types::OTHER, Java::JavaSQL::Types::STRUCT, Java::JavaSQL::Types::TIME_WITH_TIMEZONE, Java::JavaSQL::Types::TIME].freeze
+
+        # Return PostgreSQL hstore types as ruby Hashes instead of
+        # Java HashMaps.  Only used if the database does not have a
+        # conversion proc for the type.
+        HSTORE_METHOD = Object.new
+        def HSTORE_METHOD.call(r, i)
+          if v = r.getObject(i)
+            v.to_hash
+          end
+        end 
+
+        def type_convertor(map, meta, type, i)
+          case type
+          when *PG_SPECIFIC_TYPES
+            oid = meta.getField(i).getOID
+            if pr = db.oid_convertor_proc(oid)
+              pr
+            elsif oid == 28 # XID (Transaction ID)
+              map[INTEGER_TYPE]
+            elsif oid == 2950 # UUID
+              map[STRING_TYPE]
+            elsif meta.getPGType(i) == 'hstore'
+              HSTORE_METHOD
+            else
+              super
+            end
+          else
+            super
+          end
         end
       end
     end

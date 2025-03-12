@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The sql_expr extension adds the sql_expr method to every object, which
 # returns an wrapped object that works nicely with Sequel's DSL by calling
 # Sequel.expr:
@@ -12,9 +14,10 @@
 #
 #   Sequel.extension :sql_expr
 
+#
 class Object
   # Return the object wrapper in an appropriate Sequel expression object.
   def sql_expr
-    Sequel.expr(self)
+    Sequel[self]
   end
 end

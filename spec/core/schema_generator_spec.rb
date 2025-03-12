@@ -1,135 +1,172 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), 'spec_helper')
+require_relative "spec_helper"
 
-describe Sequel::Schema::Generator do
+describe Sequel::Schema::CreateTableGenerator do
   before do
-    @generator = Sequel::Schema::Generator.new(Sequel.mock) do
-      string :title
-      column :body, :text
-      foreign_key :parent_id
-      primary_key :id
-      check 'price > 100'
-      constraint(:xxx) {{:yyy => :zzz}}
-      index :title
-      index [:title, :body], :unique => true
-      foreign_key :node_id, :nodes
-      foreign_key :deferrable_node_id, :nodes, :deferrable => true
-      primary_key [:title, :parent_id], :name => :cpk
-      foreign_key [:node_id, :prop_id], :nodes_props, :name => :cfk
+    @generator = Sequel::Schema::CreateTableGenerator.new(Sequel.mock) do
+      string(:title).must_be_nil
+      column(:body, :text).must_be_nil
+      foreign_key(:parent_id).must_be_nil
+      primary_key(:id).must_be_nil
+      check('price > 100').must_be_nil
+      constraint(:xxx){{:yyy => :zzz}}.must_be_nil
+      index(:title).must_be_nil
+      index([:title, :body], :unique => true).must_be_nil
+      foreign_key(:node_id, :nodes).must_be_nil
+      foreign_key(:deferrable_node_id, :nodes, :deferrable => true).must_be_nil
+      primary_key([:title, :parent_id], :name => :cpk).must_be_nil
+      foreign_key([:node_id, :prop_id], :nodes_props, :name => :cfk).must_be_nil
     end
     @columns, @indexes, @constraints = @generator.columns, @generator.indexes, @generator.constraints
   end
   
   it "should respond to everything" do
-    @generator.respond_to?(:foo).should be_true
-  end if RUBY_VERSION >= '1.9'
+    @generator.respond_to?(:foo).must_equal true
+  end
+
+  it "should respond adding types" do
+    c = Class.new(Sequel::Schema::CreateTableGenerator)
+    c2 = Class.new
+    def c2.to_s; 'Foo' end
+    c.add_type_method(c2)
+    gen = c.new(Sequel.mock) do
+      Foo :bar
+    end
+
+    gen.columns.first.values_at(:name, :type).must_equal [:bar, c2]
+  end
 
   it "should primary key column first" do
-    @columns.first[:name].should == :id
-    @columns.first[:primary_key].should == true
-    @columns[3][:name].should == :parent_id
-    @columns[3][:primary_key].should == nil
+    @columns.first[:name].must_equal :id
+    @columns.first[:primary_key].must_equal true
+    @columns[3][:name].must_equal :parent_id
+    @columns[3][:primary_key].must_be_nil
+  end
+  
+  it "should respect existing column order if primary_key :keep_order is used" do
+    generator = Sequel::Schema::CreateTableGenerator.new(Sequel.mock) do
+      string :title
+      primary_key :id, :keep_order=>true
+    end
+
+    columns = generator.columns
+    columns.last[:name].must_equal :id
+    columns.last[:primary_key].must_equal true
+    columns.first[:name].must_equal :title
+    columns.first[:primary_key].must_be_nil
+  end
+  
+  it "should handle SQL::Identifier and SQL::QualifiedIdentifier as foreign_key arguments" do
+    generator = Sequel::Schema::CreateTableGenerator.new(Sequel.mock) do
+      foreign_key :a_id, Sequel.identifier(:as)
+      foreign_key :b_id, Sequel.qualify(:c, :b)
+    end
+
+    columns = generator.columns
+    columns.first.values_at(:name, :table).must_equal [:a_id, Sequel.identifier(:as)]
+    columns.last.values_at(:name, :table).must_equal [:b_id, Sequel.qualify(:c, :b)]
   end
   
   it "counts definitions correctly" do
-    @columns.size.should == 6
-    @indexes.size.should == 2
-    @constraints.size.should == 4
+    @columns.size.must_equal 6
+    @indexes.size.must_equal 2
+    @constraints.size.must_equal 4
   end
   
   it "retrieves primary key name" do
-    @generator.primary_key_name.should == :id
+    @generator.primary_key_name.must_equal :id
   end
 
   it "keeps columns in order" do
-    @columns[1][:name].should == :title
-    @columns[1][:type].should == :string
-    @columns[2][:name].should == :body
-    @columns[2][:type].should == :text
+    @columns[1][:name].must_equal :title
+    @columns[1][:type].must_equal :string
+    @columns[2][:name].must_equal :body
+    @columns[2][:type].must_equal :text
   end
   
   it "creates foreign key column" do
-    @columns[3][:name].should == :parent_id
-    @columns[3][:type].should == Integer
-    @columns[4][:name].should == :node_id
-    @columns[4][:type].should == Integer
+    @columns[3][:name].must_equal :parent_id
+    @columns[3][:type].must_equal Integer
+    @columns[4][:name].must_equal :node_id
+    @columns[4][:type].must_equal Integer
   end
 
   it "creates deferrable altered foreign key column" do
-    @columns[5][:name].should == :deferrable_node_id
-    @columns[5][:type].should == Integer
-    @columns[5][:deferrable].should == true
+    @columns[5][:name].must_equal :deferrable_node_id
+    @columns[5][:type].must_equal Integer
+    @columns[5][:deferrable].must_equal true
   end
   
   it "uses table for foreign key columns, if specified" do
-    @columns[3][:table].should == nil
-    @columns[4][:table].should == :nodes
-    @constraints[3][:table].should == :nodes_props
+    @columns[3][:table].must_be_nil
+    @columns[4][:table].must_equal :nodes
+    @constraints[3][:table].must_equal :nodes_props
   end
   
   it "finds columns" do
     [:title, :body, :parent_id, :id].each do |col|
-      @generator.has_column?(col).should be_true
+      @generator.has_column?(col).must_equal true
     end
-    @generator.has_column?(:foo).should_not be_true
+    @generator.has_column?(:foo).wont_equal true
   end
   
   it "creates constraints" do
-    @constraints[0][:name].should == nil
-    @constraints[0][:type].should == :check
-    @constraints[0][:check].should == ['price > 100']
+    @constraints[0][:name].must_be_nil
+    @constraints[0][:type].must_equal :check
+    @constraints[0][:check].must_equal ['price > 100']
 
-    @constraints[1][:name].should == :xxx
-    @constraints[1][:type].should == :check
-    @constraints[1][:check].should be_a_kind_of(Proc)
+    @constraints[1][:name].must_equal :xxx
+    @constraints[1][:type].must_equal :check
+    @constraints[1][:check].must_be_kind_of Proc
 
-    @constraints[2][:name].should == :cpk
-    @constraints[2][:type].should == :primary_key
-    @constraints[2][:columns].should == [ :title, :parent_id ]
+    @constraints[2][:name].must_equal :cpk
+    @constraints[2][:type].must_equal :primary_key
+    @constraints[2][:columns].must_equal [ :title, :parent_id ]
 
-    @constraints[3][:name].should == :cfk
-    @constraints[3][:type].should == :foreign_key
-    @constraints[3][:columns].should == [ :node_id, :prop_id ]
-    @constraints[3][:table].should == :nodes_props
+    @constraints[3][:name].must_equal :cfk
+    @constraints[3][:type].must_equal :foreign_key
+    @constraints[3][:columns].must_equal [ :node_id, :prop_id ]
+    @constraints[3][:table].must_equal :nodes_props
   end
   
   it "creates indexes" do
-    @indexes[0][:columns].should include(:title)
-    @indexes[1][:columns].should include(:title)
-    @indexes[1][:columns].should include(:body)
+    @indexes[0][:columns].must_equal [:title]
+    @indexes[1][:columns].must_equal [:title, :body]
   end
 end
 
 describe Sequel::Schema::AlterTableGenerator do
   before do
     @generator = Sequel::Schema::AlterTableGenerator.new(Sequel.mock) do
-      add_column :aaa, :text
-      drop_column :bbb
-      rename_column :ccc, :ho
-      set_column_type :ddd, :float
-      set_column_default :eee, 1
-      add_index [:fff, :ggg]
-      drop_index :hhh
-      drop_index :hhh, :name=>:blah_blah
-      add_full_text_index :blah
-      add_spatial_index :geom
-      add_index :blah, :type => :hash
-      add_index :blah, :where => {:something => true}
-      add_constraint :con1, 'fred > 100'
-      drop_constraint :con2
-      add_unique_constraint [:aaa, :bbb, :ccc], :name => :con3
-      add_primary_key :id
-      add_foreign_key :node_id, :nodes
-      add_primary_key [:aaa, :bbb]
-      add_foreign_key [:node_id, :prop_id], :nodes_props
-      add_foreign_key [:node_id, :prop_id], :nodes_props, :name => :fkey
-      drop_foreign_key :node_id
-      drop_foreign_key [:node_id, :prop_id]
-      drop_foreign_key [:node_id, :prop_id], :name => :fkey
+      add_column(:aaa, :text).must_be_nil
+      drop_column(:bbb).must_be_nil
+      rename_column(:ccc, :ho).must_be_nil
+      set_column_type(:ddd, :float).must_be_nil
+      set_column_default(:eee, 1).must_be_nil
+      add_index([:fff, :ggg]).must_be_nil
+      drop_index(:hhh).must_be_nil
+      drop_index(:hhh, :name=>:blah_blah).must_be_nil
+      add_full_text_index(:blah).must_be_nil
+      add_spatial_index(:geom).must_be_nil
+      add_index(:blah, :type => :hash).must_be_nil
+      add_index(:blah, :where => {:something => true}).must_be_nil
+      add_constraint(:con1, 'fred > 100').must_be_nil
+      drop_constraint(:con2).must_be_nil
+      add_unique_constraint([:aaa, :bbb, :ccc], :name => :con3).must_be_nil
+      add_primary_key(:id).must_be_nil
+      add_foreign_key(:node_id, :nodes).must_be_nil
+      add_primary_key([:aaa, :bbb]).must_be_nil
+      add_foreign_key([:node_id, :prop_id], :nodes_props).must_be_nil
+      add_foreign_key([:node_id, :prop_id], :nodes_props, :name => :fkey).must_be_nil
+      drop_foreign_key(:node_id).must_be_nil
+      drop_foreign_key([:node_id, :prop_id]).must_be_nil
+      drop_foreign_key([:node_id, :prop_id], :name => :fkey).must_be_nil
+      add_column(:iii, :text, :index=>true).must_be_nil
+      add_column(:jjj, :text, :index=>{:name=>:jjj_index}).must_be_nil
     end
   end
   
-  specify "should generate operation records" do
-    @generator.operations.should == [
+  it "should generate operation records" do
+    @generator.operations.must_equal [
       {:op => :add_column, :name => :aaa, :type => :text},
       {:op => :drop_column, :name => :bbb},
       {:op => :rename_column, :name => :ccc, :new_name => :ho},
@@ -154,13 +191,17 @@ describe Sequel::Schema::AlterTableGenerator do
       {:op => :drop_column, :name => :node_id},
       {:op => :drop_constraint, :type => :foreign_key, :columns => [:node_id, :prop_id]},
       {:op => :drop_constraint, :type => :foreign_key, :columns => [:node_id, :prop_id], :name => :fkey},
+      {:op => :add_column, :name => :iii, :type => :text},
+      {:op => :add_index, :columns => [:iii]},
+      {:op => :add_column, :name => :jjj, :type => :text},
+      {:op => :add_index, :columns => [:jjj], :name => :jjj_index},
     ]
   end
 end
 
-describe "Sequel::Schema::Generator generic type methods" do
+describe "Sequel::Schema::CreateTableGenerator generic type methods" do
   it "should store the type class in :type for each column" do
-    Sequel::Schema::Generator.new(Sequel.mock) do
+    Sequel::Schema::CreateTableGenerator.new(Sequel.mock) do
       String :a
       Integer :b
       Fixnum :c
@@ -174,6 +215,43 @@ describe "Sequel::Schema::Generator generic type methods" do
       File :k
       TrueClass :l
       FalseClass :m
-    end.columns.map{|c| c[:type]}.should == [String, Integer, Fixnum, Bignum, Float, BigDecimal, Date, DateTime, Time, Numeric, File, TrueClass, FalseClass]
+    end.columns.map{|c| c[:type]}.must_equal [String, Integer, Integer, :Bignum, Float, BigDecimal, Date, DateTime, Time, Numeric, File, TrueClass, FalseClass]
+  end
+end
+
+describe Sequel::Schema::CreateTableGenerator do
+  before do
+    @generator = Sequel::Schema::CreateTableGenerator.new(Sequel.mock)
+  end
+
+  it "should support usage without a block" do
+    @generator.columns.must_be_empty
+    @generator.indexes.must_be_empty
+    @generator.constraints.must_be_empty
+
+    @generator.column :a, String
+    @generator.columns.wont_be_empty
+  end
+
+  it "should not handle method calls without name" do
+    proc{@generator.foo123}.must_raise NoMethodError
+  end
+
+  it "should return name of the primary key" do
+    @generator.primary_key_name.must_be_nil
+    @generator.primary_key :id
+    @generator.primary_key_name.must_equal :id
+  end
+end
+
+describe Sequel::Schema::AlterTableGenerator do
+  before do
+    @generator = Sequel::Schema::AlterTableGenerator.new(Sequel.mock)
+  end
+
+  it "should support usage without a block" do
+    @generator.operations.must_be_empty
+    @generator.add_column :a, String
+    @generator.operations.wont_be_empty
   end
 end

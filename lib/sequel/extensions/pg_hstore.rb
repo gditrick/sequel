@@ -1,14 +1,16 @@
+# frozen-string-literal: true
+#
 # The pg_hstore extension adds support for the PostgreSQL hstore type
 # to Sequel.  hstore is an extension that ships with PostgreSQL, and
 # the hstore type stores an arbitrary key-value table, where the keys
 # are strings and the values are strings or NULL.
 #
-# This extension integrates with Sequel's native postgres adapter, so
-# that when hstore fields are retrieved, they are parsed and returned
+# This extension integrates with Sequel's native postgres and jdbc/postgresql
+# adapters, so that when hstore fields are retrieved, they are parsed and returned
 # as instances of Sequel::Postgres::HStore.  HStore is
 # a DelegateClass of Hash, so it mostly acts like a hash, but not
 # completely (is_a?(Hash) is false).  If you want the actual hash,
-# you can call Hstore#to_hash.  This is done so that Sequel does not
+# you can call HStore#to_hash.  This is done so that Sequel does not
 # treat a HStore like a Hash by default, which would cause issues.
 #
 # In addition to the parsers, this extension comes with literalizers
@@ -19,8 +21,8 @@
 #
 #   Sequel.hstore(hash)
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Hash#hstore:
 # 
 #   hash.hstore
@@ -28,16 +30,16 @@
 # Since the hstore type only supports strings, non string keys and
 # values are converted to strings
 #
-#   {:foo=>1}.hstore.to_hash # {'foo'=>'1'}
-#   v = {}.hstore
+#   Sequel.hstore(foo: 1).to_hash # {'foo'=>'1'}
+#   v = Sequel.hstore({})
 #   v[:foo] = 1
 #   v # {'foo'=>'1'}
 #
 # However, to make life easier, lookups by key are converted to
 # strings (even when accessing the underlying hash directly):
 #
-#   {'foo'=>'bar'}.hstore[:foo] # 'bar'
-#   {'foo'=>'bar'}.hstore.to_hash[:foo] # 'bar'
+#   Sequel.hstore('foo'=>'bar')[:foo] # 'bar'
+#   Sequel.hstore('foo'=>'bar').to_hash[:foo] # 'bar'
 # 
 # HStore instances mostly just delegate to the underlying hash
 # instance, so Hash methods that modify the receiver or returned
@@ -47,18 +49,18 @@
 #
 # * \[\]
 # * \[\]=
-# * assoc (ruby 1.9 only)
+# * assoc
 # * delete
 # * fetch
 # * has_key?
 # * has_value?
 # * include?
-# * key (ruby 1.9 only)
+# * key
 # * key?
 # * member?
 # * merge
 # * merge!
-# * rassoc (ruby 1.9 only)
+# * rassoc
 # * replace
 # * store
 # * update
@@ -66,22 +68,24 @@
 #
 # If you want to insert a hash into an hstore database column:
 #
-#   DB[:table].insert(:column=>{'foo'=>'bar'}.hstore)
+#   DB[:table].insert(column: Sequel.hstore('foo'=>'bar'))
 #
-# If you would like to use hstore columns in your model objects, you
-# probably want to modify the schema parsing/typecasting so that it
-# recognizes and correctly handles the hstore columns, which you can
-# do by:
+# To use this extension, first load it into your Sequel::Database instance:
 #
 #   DB.extension :pg_hstore
 #
-# If you are not using the native postgres adapter and are using hstore
-# types as model column values you probably should use the
-# typecast_on_load plugin if the column values are returned as a
-# hash, and the pg_typecast_on_load plugin if the column
-# values are returned as a string.
+# This extension integrates with the pg_array extension.  If you plan
+# to use arrays of hstore types, load the pg_array extension before the
+# pg_hstore extension:
+#
+#   DB.extension :pg_array, :pg_hstore
+#
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using hstore columns in CREATE/ALTER TABLE statements.
 #
 # This extension requires the delegate and strscan libraries.
+#
+# Related module: Sequel::Postgres::HStore
 
 require 'delegate'
 require 'strscan'
@@ -93,14 +97,6 @@ module Sequel
 
       # Parser for PostgreSQL hstore output format.
       class Parser < StringScanner
-        QUOTE_RE = /"/.freeze
-        KV_SEP_RE = /"\s*=>\s*/.freeze
-        NULL_RE = /NULL/.freeze
-        SEP_RE = /,\s*/.freeze
-        QUOTED_RE = /(\\"|[^"])*/.freeze
-        REPLACE_RE = /\\(.)/.freeze
-        REPLACE_WITH = '\1'.freeze
-
         # Parse the output format that PostgreSQL uses for hstore
         # columns.  Note that this does not attempt to parse all
         # input formats that PostgreSQL will accept.  For instance,
@@ -113,17 +109,17 @@ module Sequel
           return @result if @result
           hash = {}
           while !eos?
-            skip(QUOTE_RE)
+            skip(/"/)
             k = parse_quoted
-            skip(KV_SEP_RE)
-            if skip(QUOTE_RE)
+            skip(/"\s*=>\s*/)
+            if skip(/"/)
               v = parse_quoted
-              skip(QUOTE_RE)
+              skip(/"/)
             else
-              scan(NULL_RE)
+              scan(/NULL/)
               v = nil
             end
-            skip(SEP_RE)
+            skip(/,\s*/)
             hash[k] = v
           end
           @result = hash
@@ -133,14 +129,14 @@ module Sequel
 
         # Parse and unescape a quoted key/value.
         def parse_quoted
-          scan(QUOTED_RE).gsub(REPLACE_RE, REPLACE_WITH)
+          scan(/(\\"|[^"])*/).gsub(/\\(.)/, '\1')
         end
       end
 
       module DatabaseMethods
         def self.extended(db)
-          db.instance_eval do
-            add_named_conversion_procs(conversion_procs, :hstore=>PG_NAMED_TYPES[:hstore])
+          db.instance_exec do
+            add_named_conversion_proc(:hstore, &HStore.method(:parse))
             @schema_type_classes[:hstore] = HStore
           end
         end
@@ -162,6 +158,16 @@ module Sequel
         # Recognize the hstore database type.
         def schema_column_type(db_type)
           db_type == 'hstore' ? :hstore : super
+        end
+
+        # Set the :callable_default value if the default value is recognized as an empty hstore.
+        def schema_post_process(_)
+          super.each do |a|
+            h = a[1]
+            if h[:type] == :hstore && h[:default] =~ /\A''::hstore\z/
+              h[:callable_default] = lambda{HStore.new({})}
+            end
+          end
         end
 
         # Typecast value correctly to HStore.  If already an
@@ -186,22 +192,12 @@ module Sequel
       # keys to strings during lookup.
       DEFAULT_PROC = lambda{|h, k| h[k.to_s] unless k.is_a?(String)}
 
-      QUOTE = '"'.freeze
-      COMMA = ",".freeze
-      KV_SEP = "=>".freeze
-      NULL = "NULL".freeze
-      ESCAPE_RE = /("|\\)/.freeze
-      ESCAPE_REPLACE = '\\\\\1'.freeze
-      HSTORE_CAST = '::hstore'.freeze
-
-      if RUBY_VERSION >= '1.9'
-        # Undef 1.9 marshal_{dump,load} methods in the delegate class,
-        # so that ruby 1.9 uses the old style _dump/_load methods defined
-        # in the delegate class, instead of the marshal_{dump,load} methods
-        # in the Hash class.
-        undef_method :marshal_load
-        undef_method :marshal_dump
-      end
+      # Undef marshal_{dump,load} methods in the delegate class,
+      # so that ruby uses the old style _dump/_load methods defined
+      # in the delegate class, instead of the marshal_{dump,load} methods
+      # in the Hash class.
+      undef_method :marshal_load
+      undef_method :marshal_dump
 
       # Use custom marshal loading, since underlying hash uses a default proc.
       def self._load(args)
@@ -215,12 +211,12 @@ module Sequel
       end
 
       # Override methods that accept key argument to convert to string.
-      (%w'[] delete has_key? include? key? member?' + Array((%w'assoc' if RUBY_VERSION >= '1.9.0'))).each do |m|
+      %w'[] delete has_key? include? key? member? assoc'.each do |m|
         class_eval("def #{m}(k) super(k.to_s) end", __FILE__, __LINE__)
       end
 
       # Override methods that accept value argument to convert to string unless nil.
-      (%w'has_value? value?' + Array((%w'key rassoc' if RUBY_VERSION >= '1.9.0'))).each do |m|
+      %w'has_value? value? key rassoc'.each do |m|
         class_eval("def #{m}(v) super(convert_value(v)) end", __FILE__, __LINE__)
       end
 
@@ -257,19 +253,19 @@ module Sequel
       # Append a literalize version of the hstore to the sql.
       def sql_literal_append(ds, sql)
         ds.literal_append(sql, unquoted_literal)
-        sql << HSTORE_CAST
+        sql << '::hstore'
       end
 
       # Return a string containing the unquoted, unstring-escaped
       # literal version of the hstore.  Separated out for use by
       # the bound argument code.
       def unquoted_literal
-        str = ''
+        str = String.new
         comma = false
-        commas = COMMA
-        quote = QUOTE
-        kv_sep = KV_SEP
-        null = NULL
+        commas = ","
+        quote = '"'
+        kv_sep = "=>"
+        null = "NULL"
         each do |k, v|
           str << commas if comma
           str << quote << escape_value(k) << quote
@@ -282,6 +278,11 @@ module Sequel
           comma = true
         end
         str
+      end
+
+      # Allow automatic parameterization.
+      def sequel_auto_param_type(ds)
+        "::hstore"
       end
 
       private
@@ -302,13 +303,9 @@ module Sequel
       # Escape key/value strings when literalizing to
       # correctly handle backslash and quote characters.
       def escape_value(k)
-        k.to_s.gsub(ESCAPE_RE, ESCAPE_REPLACE)
+        k.to_s.gsub(/("|\\)/, '\\\\\1')
       end
     end
-
-    PG_NAMED_TYPES = {} unless defined?(PG_NAMED_TYPES)
-    # Associate the named types by default.
-    PG_NAMED_TYPES[:hstore] = HStore.method(:parse)
   end
 
   module SQL::Builders

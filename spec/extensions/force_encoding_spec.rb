@@ -1,114 +1,126 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
-if RUBY_VERSION >= '1.9.0'
+require_relative "spec_helper"
+
 describe "force_encoding plugin" do
   before do
-    @c = Class.new(Sequel::Model) do
-    end
+    @c = Class.new(Sequel::Model)
     @c.columns :id, :x
     @c.plugin :force_encoding, 'UTF-8'
     @e1 = Encoding.find('UTF-8')
   end
 
-  specify "should force encoding to given encoding on load" do
-    s = 'blah'
+  it "should force encoding to given encoding on load" do
+    s = 'blah'.dup
     s.force_encoding('US-ASCII')
     o = @c.load(:id=>1, :x=>s)
-    o.x.should == 'blah'
-    o.x.encoding.should == @e1
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal @e1
   end
   
-  specify "should force encoding to given encoding when setting column values" do
-    s = 'blah'
+  it "should force encoding to given encoding when setting column values" do
+    s = 'blah'.dup
     s.force_encoding('US-ASCII')
     o = @c.new(:x=>s)
-    o.x.should == 'blah'
-    o.x.encoding.should == @e1
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal @e1
   end
   
-  specify "should work correctly when given a frozen string" do
-    s = 'blah'
+  it "should not force encoding of blobs to given encoding on load" do
+    s = Sequel.blob('blah'.dup.force_encoding('BINARY'))
+    o = @c.load(:id=>1, :x=>s)
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal Encoding.find('BINARY')
+  end
+  
+  it "should not force encoding of blobs to given encoding when setting column values" do
+    s = Sequel.blob('blah'.dup.force_encoding('BINARY'))
+    o = @c.new(:x=>s)
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal Encoding.find('BINARY')
+  end
+  
+  it "should work correctly when given a frozen string" do
+    s = 'blah'.dup
     s.force_encoding('US-ASCII')
     s.freeze
     o = @c.new(:x=>s)
-    o.x.should == 'blah'
-    o.x.encoding.should == @e1
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal @e1
   end
   
-  specify "should have a forced_encoding class accessor" do
-    s = 'blah'
+  it "should have a forced_encoding class accessor" do
+    s = 'blah'.dup
     s.force_encoding('US-ASCII')
     @c.forced_encoding = 'Windows-1258'
     o = @c.load(:id=>1, :x=>s)
-    o.x.should == 'blah'
-    o.x.encoding.should == Encoding.find('Windows-1258')
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal Encoding.find('Windows-1258')
   end
   
-  specify "should not force encoding if forced_encoding is nil" do
-    s = 'blah'
+  it "should not force encoding if forced_encoding is nil" do
+    s = 'blah'.dup
     s.force_encoding('US-ASCII')
     @c.forced_encoding = nil
     o = @c.load(:id=>1, :x=>s)
-    o.x.should == 'blah'
-    o.x.encoding.should == Encoding.find('US-ASCII')
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal Encoding.find('US-ASCII')
   end
   
-  specify "should work correctly when subclassing" do
+  it "should work correctly when subclassing" do
     c = Class.new(@c)
-    s = 'blah'
+    s = 'blah'.dup
     s.force_encoding('US-ASCII')
     o = c.load(:id=>1, :x=>s)
-    o.x.should == 'blah'
-    o.x.encoding.should == @e1
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal @e1
     
     c.plugin :force_encoding, 'UTF-16LE'
-    s = ''
+    s = String.new
     s.force_encoding('US-ASCII')
     o = c.load(:id=>1, :x=>s)
-    o.x.should == ''
-    o.x.encoding.should == Encoding.find('UTF-16LE')
+    o.x.must_equal ''
+    o.x.encoding.must_equal Encoding.find('UTF-16LE')
     
     @c.plugin :force_encoding, 'UTF-32LE'
-    s = ''
+    s = String.new
     s.force_encoding('US-ASCII')
     o = @c.load(:id=>1, :x=>s)
-    o.x.should == ''
-    o.x.encoding.should == Encoding.find('UTF-32LE')
+    o.x.must_equal ''
+    o.x.encoding.must_equal Encoding.find('UTF-32LE')
     
-    s = ''
+    s = String.new
     s.force_encoding('US-ASCII')
     o = c.load(:id=>1, :x=>s)
-    o.x.should == ''
-    o.x.encoding.should == Encoding.find('UTF-16LE')
+    o.x.must_equal ''
+    o.x.encoding.must_equal Encoding.find('UTF-16LE')
   end
   
-  specify "should work when saving new model instances" do
+  it "should work when saving new model instances" do
     o = @c.new
-    ds = DB[:a]
-    def ds.first
-      s = 'blah'
-      s.force_encoding('US-ASCII')
-      {:id=>1, :x=>s}
+    @c.dataset = DB[:a].with_extend do
+      def first
+        s = 'blah'.dup
+        s.force_encoding('US-ASCII')
+        {:id=>1, :x=>s}
+      end
     end
-    @c.dataset = ds
+    @c.instance_variable_set(:@fast_pk_lookup_sql, nil)
     o.save
-    o.x.should == 'blah'
-    o.x.encoding.should == @e1
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal @e1
   end
   
-  specify "should work when refreshing model instances" do
-    o = @c.load(:id=>1, :x=>'as')
-    ds = DB[:a]
-    def ds.first
-      s = 'blah'
-      s.force_encoding('US-ASCII')
-      {:id=>1, :x=>s}
+  it "should work when refreshing model instances" do
+    o = @c.load(:id=>1, :x=>'as'.dup)
+    @c.dataset = DB[:a].with_extend do
+      def first
+        s = 'blah'.dup
+        s.force_encoding('US-ASCII')
+        {:id=>1, :x=>s}
+      end
     end
-    @c.dataset = ds
+    @c.instance_variable_set(:@fast_pk_lookup_sql, nil)
     o.refresh
-    o.x.should == 'blah'
-    o.x.encoding.should == @e1
+    o.x.must_equal 'blah'
+    o.x.encoding.must_equal @e1
   end
 end 
-else
-  skip_warn "force_encoding plugin: only works on ruby 1.9+"
-end

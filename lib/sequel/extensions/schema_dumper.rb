@@ -1,54 +1,127 @@
+# frozen-string-literal: true
+#
 # The schema_dumper extension supports dumping tables and indexes
 # in a Sequel::Migration format, so they can be restored on another
 # database (which can be the same type or a different type than
 # the current database).  The main interface is through
 # Sequel::Database#dump_schema_migration.
 #
+# The schema_dumper extension is quite limited in what types of
+# database objects it supports.  In general, it only supports
+# dumping tables, columns, primary key and foreign key constraints,
+# and some indexes.  It does not support most table options, CHECK
+# constraints, partial indexes, database functions, triggers,
+# security grants/revokes, and a wide variety of other useful
+# database properties.  Be aware of the limitations when using the
+# schema_dumper extension. If you are dumping the schema to restore
+# to the same database type, it is recommended to use your database's
+# dump and restore programs instead of the schema_dumper extension.
+#
 # To load the extension:
 #
 #   DB.extension :schema_dumper
+#
+# Related module: Sequel::SchemaDumper
 
 Sequel.extension :eval_inspect
 
 module Sequel
   module SchemaDumper
+    # :nocov:
+    IGNORE_INDEX_ERRORS_KEY = RUBY_VERSION >= '3.4' ? 'ignore_index_errors: ' : ':ignore_index_errors=>'
+    # :nocov:
+    private_constant :IGNORE_INDEX_ERRORS_KEY
+
+    # Convert the column schema information to a hash of column options, one of which must
+    # be :type.  The other options added should modify that type (e.g. :size).  If a
+    # database type is not recognized, return it as a String type.
+    def column_schema_to_ruby_type(schema)
+      type = schema[:db_type].downcase
+      if database_type == :oracle
+        type = type.sub(/ not null\z/, '')
+      end
+      case type
+      when /\A(medium|small)?int(?:eger)?(?:\((\d+)\))?( unsigned)?\z/
+        if !$1 && $2 && $2.to_i >= 10 && $3
+          # Unsigned integer type with 10 digits can potentially contain values which
+          # don't fit signed integer type, so use bigint type in target database.
+          {:type=>:Bignum}
+        else
+          {:type=>Integer}
+        end
+      when /\Atinyint(?:\((\d+)\))?(?: unsigned)?\z/
+        {:type =>schema[:type] == :boolean ? TrueClass : Integer}
+      when /\Abigint(?:\((?:\d+)\))?(?: unsigned)?\z/
+        {:type=>:Bignum}
+      when /\A(?:real|float|double(?: precision)?|double\(\d+,\d+\))(?: unsigned)?\z/
+        {:type=>Float}
+      when 'boolean', 'bit', 'bool'
+        {:type=>TrueClass}
+      when /\A(?:(?:tiny|medium|long|n)?text|clob)\z/
+        {:type=>String, :text=>true}
+      when 'date'
+        {:type=>Date}
+      when /\A(?:small)?datetime\z/
+        {:type=>DateTime}
+      when /\Atimestamp(?:\((\d+)\))?(?: with(?:out)? time zone)?\z/
+        {:type=>DateTime, :size=>($1.to_i if $1)}
+      when /\Atime(?: with(?:out)? time zone)?\z/
+        {:type=>Time, :only_time=>true}
+      when /\An?char(?:acter)?(?:\((\d+)\))?\z/
+        {:type=>String, :size=>($1.to_i if $1), :fixed=>true}
+      when /\A(?:n?varchar2?|character varying|bpchar|string)(?:\((\d+)\))?\z/
+        {:type=>String, :size=>($1.to_i if $1)}
+      when /\A(?:small)?money\z/
+        {:type=>BigDecimal, :size=>[19,2]}
+      when /\A(?:decimal|numeric|number)(?:\((\d+)(?:,\s*(\d+))?\))?(?: unsigned)?\z/
+        s = [($1.to_i if $1), ($2.to_i if $2)].compact
+        {:type=>BigDecimal, :size=>(s.empty? ? nil : s)}
+      when /\A(?:bytea|(?:tiny|medium|long)?blob|(?:var)?binary)(?:\((\d+)\))?\z/
+        {:type=>File, :size=>($1.to_i if $1)}
+      when /\A(?:year|(?:int )?identity)\z/
+        {:type=>Integer}
+      else
+        {:type=>String}
+      end
+    end
+
     # Dump foreign key constraints for all tables as a migration. This complements
-    # the :foreign_keys=>false option to dump_schema_migration. This only dumps
+    # the foreign_keys: false option to dump_schema_migration. This only dumps
     # the constraints (not the columns) using alter_table/add_foreign_key with an
     # array of columns.
     #
     # Note that the migration this produces does not have a down
     # block, so you cannot reverse it.
     def dump_foreign_key_migration(options=OPTS)
-      ts = tables(options)
+      ts = _dump_tables(options)
       <<END_MIG
 Sequel.migration do
   change do
-#{ts.sort_by{|t| t.to_s}.map{|t| dump_table_foreign_keys(t)}.reject{|x| x == ''}.join("\n\n").gsub(/^/o, '    ')}
+#{ts.map{|t| dump_table_foreign_keys(t)}.reject{|x| x == ''}.join("\n\n").gsub(/^/, '    ')}
   end
 end
 END_MIG
     end
 
     # Dump indexes for all tables as a migration.  This complements
-    # the :indexes=>false option to dump_schema_migration. Options:
+    # the indexes: false option to dump_schema_migration. Options:
     # :same_db :: Create a dump for the same database type, so
     #             don't ignore errors if the index statements fail.
     # :index_names :: If set to false, don't record names of indexes. If
     #                 set to :namespace, prepend the table name to the index name if the
     #                 database does not use a global index namespace.
     def dump_indexes_migration(options=OPTS)
-      ts = tables(options)
+      ts = _dump_tables(options)
       <<END_MIG
 Sequel.migration do
   change do
-#{ts.sort_by{|t| t.to_s}.map{|t| dump_table_indexes(t, :add_index, options)}.reject{|x| x == ''}.join("\n\n").gsub(/^/o, '    ')}
+#{ts.map{|t| dump_table_indexes(t, :add_index, options)}.reject{|x| x == ''}.join("\n\n").gsub(/^/, '    ')}
   end
 end
 END_MIG
     end
 
-    # Return a string that contains a Sequel::Migration subclass that when
+    # Return a string that contains a Sequel migration that when
     # run would recreate the database structure. Options:
     # :same_db :: Don't attempt to translate database types to ruby types.
     #             If this isn't set to true, all database types will be translated to
@@ -56,7 +129,7 @@ END_MIG
     #             will yield the same type.  Without this set, types that aren't
     #             recognized will be translated to a string-like type.
     # :foreign_keys :: If set to false, don't dump foreign_keys (they can be
-    #             added later via #dump_foreign_key_migration)
+    #                  added later via #dump_foreign_key_migration)
     # :indexes :: If set to false, don't dump indexes (they can be added
     #             later via #dump_index_migration).
     # :index_names :: If set to false, don't record names of indexes. If
@@ -70,19 +143,19 @@ END_MIG
         options[:foreign_keys] = false
       end
 
-      ts = sort_dumped_tables(tables(options), options)
+      ts = sort_dumped_tables(_dump_tables(options), options)
       skipped_fks = if sfk = options[:skipped_foreign_keys]
         # Handle skipped foreign keys by adding them at the end via
         # alter_table/add_foreign_key.  Note that skipped foreign keys
         # probably result in a broken down migration.
-        sfka = sfk.sort_by{|table, fks| table.to_s}.map{|table, fks| dump_add_fk_constraints(table, fks.values)}
-        sfka.join("\n\n").gsub(/^/o, '    ') unless sfka.empty?
+        sfka = sfk.sort.map{|table, fks| dump_add_fk_constraints(table, fks.values)}
+        sfka.join("\n\n").gsub(/^/, '    ') unless sfka.empty?
       end
 
       <<END_MIG
 Sequel.migration do
   change do
-#{ts.map{|t| dump_table_schema(t, options)}.join("\n\n").gsub(/^/o, '    ')}#{"\n    \n" if skipped_fks}#{skipped_fks}
+#{ts.map{|t| dump_table_schema(t, options)}.join("\n\n").gsub(/^/, '    ')}#{"\n    \n" if skipped_fks}#{skipped_fks}
   end
 end
 END_MIG
@@ -91,14 +164,28 @@ END_MIG
     # Return a string with a create table block that will recreate the given
     # table's schema.  Takes the same options as dump_schema_migration.
     def dump_table_schema(table, options=OPTS)
-      table = table.value.to_s if table.is_a?(SQL::Identifier)
       gen = dump_table_generator(table, options)
       commands = [gen.dump_columns, gen.dump_constraints, gen.dump_indexes].reject{|x| x == ''}.join("\n\n")
-      "create_table(#{table.inspect}#{', :ignore_index_errors=>true' if !options[:same_db] && options[:indexes] != false && !gen.indexes.empty?}) do\n#{commands.gsub(/^/o, '  ')}\nend"
+      "create_table(#{table.inspect}#{", #{IGNORE_INDEX_ERRORS_KEY}true" if !options[:same_db] && options[:indexes] != false && !gen.indexes.empty?}) do\n#{commands.gsub(/^/, '  ')}\nend"
     end
 
     private
         
+    # Handle schema option to dump tables in a different schema. Such
+    # tables must be schema qualified for this to work correctly.
+    def _dump_tables(opts)
+      if opts[:schema]
+        _literal_table_sort(tables(opts.merge(:qualify=>true)))
+      else
+        tables(opts).sort
+      end
+    end
+
+    # Sort the given table by the literalized value.
+    def _literal_table_sort(tables)
+      tables.sort_by{|s| literal(s)}
+    end
+
     # If a database default exists and can't be converted, and we are dumping with :same_db,
     # return a string with the inspect method modified a literal string is created if the code is evaled.  
     def column_schema_to_ruby_default_fallback(default, options)
@@ -111,95 +198,79 @@ END_MIG
       end
     end
 
-    # Recreate the column in the passed Schema::Generator from the given name and parsed database schema.
+    # Recreate the column in the passed Schema::CreateTableGenerator from the given name and parsed database schema.
     def recreate_column(name, schema, gen, options)
       if options[:single_pk] && schema_autoincrementing_primary_key?(schema)
         type_hash = options[:same_db] ? {:type=>schema[:db_type]} : column_schema_to_ruby_type(schema)
         [:table, :key, :on_delete, :on_update, :deferrable].each{|f| type_hash[f] = schema[f] if schema[f]}
-        if type_hash == {:type=>Integer} || type_hash == {:type=>"integer"}
+        if type_hash == {:type=>Integer} || type_hash == {:type=>"integer"} || type_hash == {:type=>"INTEGER"}
+          type_hash.delete(:type)
+        elsif options[:same_db] && type_hash == {:type=>type_literal_generic_bignum_symbol(type_hash).to_s}
+          type_hash[:type] = :Bignum
+        end
+
+        unless gen.columns.empty?
+          type_hash[:keep_order] = true
+        end
+
+        if type_hash.empty?
           gen.primary_key(name)
         else
           gen.primary_key(name, type_hash)
         end
       else
-        col_opts = options[:same_db] ? {:type=>schema[:db_type]} : column_schema_to_ruby_type(schema)
-        type = col_opts.delete(:type)
-        col_opts.delete(:size) if col_opts[:size].nil?
-        col_opts[:default] = if schema[:ruby_default].nil?
-          column_schema_to_ruby_default_fallback(schema[:default], options)
+        col_opts = if options[:same_db]
+          h = {:type=>schema[:db_type]}
+          if database_type == :mysql && h[:type] =~ /\Atimestamp/
+            h[:null] = true
+          end
+          if database_type == :mssql && schema[:max_length]
+            h[:size] = schema[:max_length]
+          end
+          h
         else
-          schema[:ruby_default]
+          column_schema_to_ruby_type(schema)
         end
-        col_opts.delete(:default) if col_opts[:default].nil?
+        type = col_opts.delete(:type)
+        if col_opts.key?(:size) && col_opts[:size].nil?
+          col_opts.delete(:size)
+          if max_length = schema[:max_length]
+            col_opts[:size] = max_length
+          end
+        end
+        if schema[:generated]
+          if options[:same_db] && database_type == :postgres
+            col_opts[:generated_always_as] = column_schema_to_ruby_default_fallback(schema[:default], options)
+          end
+        else
+          col_opts[:default] = if schema[:ruby_default].nil?
+            column_schema_to_ruby_default_fallback(schema[:default], options)
+          else
+            schema[:ruby_default]
+          end
+          col_opts.delete(:default) if col_opts[:default].nil?
+        end
         col_opts[:null] = false if schema[:allow_null] == false
         if table = schema[:table]
           [:key, :on_delete, :on_update, :deferrable].each{|f| col_opts[f] = schema[f] if schema[f]}
-          col_opts[:type] = type unless type == Integer || type == 'integer'
+          col_opts[:type] = type unless type == Integer || type == 'integer' || type == 'INTEGER'
           gen.foreign_key(name, table, col_opts)
         else
           gen.column(name, type, col_opts)
-          if [Integer, Bignum, Float].include?(type) && schema[:db_type] =~ / unsigned\z/io
+          if [Integer, :Bignum, Float, BigDecimal].include?(type) && schema[:db_type] =~ / unsigned\z/io
             gen.check(Sequel::SQL::Identifier.new(name) >= 0)
           end
         end
       end
     end
 
-    # Convert the column schema information to a hash of column options, one of which must
-    # be :type.  The other options added should modify that type (e.g. :size).  If a
-    # database type is not recognized, return it as a String type.
-    def column_schema_to_ruby_type(schema)
-      case schema[:db_type].downcase
-      when /\A(medium|small)?int(?:eger)?(?:\((\d+)\))?( unsigned)?\z/o
-        if !$1 && $2 && $2.to_i >= 10 && $3
-          # Unsigned integer type with 10 digits can potentially contain values which
-          # don't fit signed integer type, so use bigint type in target database.
-          {:type=>Bignum}
-        else
-          {:type=>Integer}
-        end
-      when /\Atinyint(?:\((\d+)\))?(?: unsigned)?\z/o
-        {:type =>schema[:type] == :boolean ? TrueClass : Integer}
-      when /\Abigint(?:\((?:\d+)\))?(?: unsigned)?\z/o
-        {:type=>Bignum}
-      when /\A(?:real|float|double(?: precision)?|double\(\d+,\d+\)(?: unsigned)?)\z/o
-        {:type=>Float}
-      when 'boolean'
-        {:type=>TrueClass}
-      when /\A(?:(?:tiny|medium|long|n)?text|clob)\z/o
-        {:type=>String, :text=>true}
-      when 'date'
-        {:type=>Date}
-      when /\A(?:small)?datetime\z/o
-        {:type=>DateTime}
-      when /\Atimestamp(?:\((\d+)\))?(?: with(?:out)? time zone)?\z/o
-        {:type=>DateTime, :size=>($1.to_i if $1)}
-      when /\Atime(?: with(?:out)? time zone)?\z/o
-        {:type=>Time, :only_time=>true}
-      when /\An?char(?:acter)?(?:\((\d+)\))?\z/o
-        {:type=>String, :size=>($1.to_i if $1), :fixed=>true}
-      when /\A(?:n?varchar|character varying|bpchar|string)(?:\((\d+)\))?\z/o
-        {:type=>String, :size=>($1.to_i if $1)}
-      when /\A(?:small)?money\z/o
-        {:type=>BigDecimal, :size=>[19,2]}
-      when /\A(?:decimal|numeric|number)(?:\((\d+)(?:,\s*(\d+))?\))?\z/o
-        s = [($1.to_i if $1), ($2.to_i if $2)].compact
-        {:type=>BigDecimal, :size=>(s.empty? ? nil : s)}
-      when /\A(?:bytea|(?:tiny|medium|long)?blob|(?:var)?binary)(?:\((\d+)\))?\z/o
-        {:type=>File, :size=>($1.to_i if $1)}
-      when /\A(?:year|(?:int )?identity)\z/o
-        {:type=>Integer}
-      else
-        {:type=>String}
-      end
-    end
-
     # For the table and foreign key metadata array, return an alter_table
     # string that would add the foreign keys if run in a migration.
     def dump_add_fk_constraints(table, fks)
-      sfks = "alter_table(#{table.inspect}) do\n"
+      sfks = String.new
+      sfks << "alter_table(#{table.inspect}) do\n"
       sfks << create_table_generator do
-        fks.sort_by{|fk| fk[:columns].map{|c| c.to_s}}.each do |fk|
+        fks.sort_by{|fk| fk[:columns]}.each do |fk|
           foreign_key fk[:columns], fk
         end
       end.dump_constraints.gsub(/^foreign_key /, '  add_foreign_key ')
@@ -210,7 +281,7 @@ END_MIG
     # string that would add the foreign keys if run in a migration.
     def dump_table_foreign_keys(table, options=OPTS)
       if supports_foreign_key_parsing?
-        fks = foreign_key_list(table, options).sort_by{|fk| fk[:columns].map{|c| c.to_s}}
+        fks = foreign_key_list(table, options).sort_by{|fk| fk[:columns]}
       end
 
       if fks.nil? || fks.empty?
@@ -220,19 +291,17 @@ END_MIG
       end
     end
 
-    # Return a Schema::Generator object that will recreate the
+    # Return a Schema::CreateTableGenerator object that will recreate the
     # table's schema.  Takes the same options as dump_schema_migration.
     def dump_table_generator(table, options=OPTS)
-      table = table.value.to_s if table.is_a?(SQL::Identifier)
-      raise(Error, "must provide table as a Symbol, String, or Sequel::SQL::Identifier") unless [String, Symbol].any?{|c| table.is_a?(c)}
-      s = schema(table).dup
-      pks = s.find_all{|x| x.last[:primary_key] == true}.map{|x| x.first}
+      s = schema(table, options).dup
+      pks = s.find_all{|x| x.last[:primary_key] == true}.map(&:first)
       options = options.merge(:single_pk=>true) if pks.length == 1
       m = method(:recreate_column)
       im = method(:index_to_generator_opts)
 
       if options[:indexes] != false && supports_index_parsing?
-        indexes = indexes(table).sort_by{|k,v| k.to_s}
+        indexes = indexes(table).sort
       end
 
       if options[:foreign_keys] != false && supports_foreign_key_parsing?
@@ -272,7 +341,7 @@ END_MIG
     # creating the index migration.
     def dump_table_indexes(table, meth, options=OPTS)
       if supports_index_parsing?
-        indexes = indexes(table).sort_by{|k,v| k.to_s}
+        indexes = indexes(table).sort
       else
         return ''
       end
@@ -284,7 +353,7 @@ END_MIG
       gen.dump_indexes(meth=>table, :ignore_errors=>!options[:same_db])
     end
 
-    # Convert the parsed index information into options to the Generators index method. 
+    # Convert the parsed index information into options to the CreateTableGenerator's index method. 
     def index_to_generator_opts(table, name, index_opts, options=OPTS)
       h = {}
       if options[:index_names] != false && default_index_name(table, index_opts[:columns]) != name.to_s
@@ -311,7 +380,7 @@ END_MIG
         options[:skipped_foreign_keys] = skipped_foreign_keys
         tables
       else
-        tables.sort_by{|t| t.to_s}
+        tables
       end
     end
 
@@ -336,14 +405,14 @@ END_MIG
           # outstanding foreign keys and skipping those foreign keys.
           # The skipped foreign keys will be added at the end of the
           # migration.
-          skip_table, skip_fks = table_fks.sort_by{|table, fks| [fks.length, table.to_s]}.first
+          skip_table, skip_fks = table_fks.sort_by{|table, fks| [fks.length, literal(table)]}.first
           skip_fks_hash = skipped_foreign_keys[skip_table] = {}
           skip_fks.each{|fk| skip_fks_hash[fk[:columns]] = fk}
           this_loop << skip_table
         end
 
         # Add sorted tables from this loop to the final list
-        sorted_tables.concat(this_loop.sort_by{|t| t.to_s})
+        sorted_tables.concat(_literal_table_sort(this_loop))
 
         # Remove tables that were handled this loop
         this_loop.each{|t| table_fks.delete(t)}
@@ -360,7 +429,14 @@ END_MIG
   end
 
   module Schema
-    class Generator
+    class CreateTableGenerator
+      # :nocov:
+      DEFAULT_KEY = RUBY_VERSION >= '3.4' ? 'default: ' : ':default=>'
+      IGNORE_ERRORS_KEY = RUBY_VERSION >= '3.4' ? 'ignore_errors: ' : ':ignore_errors=>'
+      # :nocov:
+      private_constant :DEFAULT_KEY
+      private_constant :IGNORE_ERRORS_KEY
+
       # Dump this generator's columns to a string that could be evaled inside
       # another instance to represent the same columns
       def dump_columns
@@ -370,7 +446,7 @@ END_MIG
           x.delete(:on_delete) if x[:on_delete] == :no_action
           x.delete(:on_update) if x[:on_update] == :no_action
         end
-        if pkn = primary_key_name
+        if (pkn = primary_key_name) && !@primary_key[:keep_order]
           cols.delete_if{|x| x[:name] == pkn}
           pk = @primary_key.dup
           pkname = pk.delete(:name)
@@ -383,11 +459,17 @@ END_MIG
           strings << if table = c.delete(:table)
             c.delete(:type) if c[:type] == Integer || c[:type] == 'integer'
             "foreign_key #{name.inspect}, #{table.inspect}#{opts_inspect(c)}"
+          elsif pkn == name
+            @db.serial_primary_key_options.each{|k,v| c.delete(k) if v == c[k]}
+            "primary_key #{name.inspect}#{opts_inspect(c)}"
           else
             type = c.delete(:type)
             opts = opts_inspect(c)
-            if type.is_a?(Class)
+            case type
+            when Class
               "#{type.name} #{name.inspect}#{opts}"
+            when :Bignum
+              "Bignum #{name.inspect}#{opts}"
             else
               "column #{name.inspect}, #{type.inspect}#{opts}"
             end
@@ -409,7 +491,7 @@ END_MIG
             if !name and c[:check].length == 1 and c[:check].first.is_a?(Hash)
               "check #{c[:check].first.inspect[1...-1]}"
             else
-              "#{name ? "constraint #{name.inspect}," : 'check'} #{c[:check].map{|x| x.inspect}.join(', ')}"
+              "#{name ? "constraint #{name.inspect}," : 'check'} #{c[:check].map(&:inspect).join(', ')}"
             end
           when :foreign_key
             c.delete(:on_delete) if c[:on_delete] == :no_action
@@ -428,17 +510,17 @@ END_MIG
 
       # Dump this generator's indexes to a string that could be evaled inside
       # another instance to represent the same indexes. Options:
-      # * :add_index - Use add_index instead of index, so the methods
-      #   can be called outside of a generator but inside a migration.
-      #   The value of this option should be the table name to use.
-      # * :drop_index - Same as add_index, but create drop_index statements.
-      # * :ignore_errors - Add the ignore_errors option to the outputted indexes
+      # :add_index :: Use add_index instead of index, so the methods
+      #               can be called outside of a generator but inside a migration.
+      #               The value of this option should be the table name to use.
+      # :drop_index :: Same as add_index, but create drop_index statements.
+      # :ignore_errors :: Add the ignore_errors option to the outputted indexes
       def dump_indexes(options=OPTS)
         is = indexes.map do |c|
           c = c.dup
           cols = c.delete(:columns)
           if table = options[:add_index] || options[:drop_index]
-            "#{options[:drop_index] ? 'drop' : 'add'}_index #{table.inspect}, #{cols.inspect}#{', :ignore_errors=>true' if options[:ignore_errors]}#{opts_inspect(c)}"
+            "#{options[:drop_index] ? 'drop' : 'add'}_index #{table.inspect}, #{cols.inspect}#{", #{IGNORE_ERRORS_KEY}true" if options[:ignore_errors]}#{opts_inspect(c)}"
           else
             "index #{cols.inspect}#{opts_inspect(c)}"
           end
@@ -456,7 +538,7 @@ END_MIG
         if opts[:default]
           opts = opts.dup
           de = Sequel.eval_inspect(opts.delete(:default)) 
-          ", :default=>#{de}#{", #{opts.inspect[1...-1]}" if opts.length > 0}"
+          ", #{DEFAULT_KEY}#{de}#{", #{opts.inspect[1...-1]}" if opts.length > 0}"
         else
           ", #{opts.inspect[1...-1]}" if opts.length > 0
         end

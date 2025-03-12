@@ -1,12 +1,15 @@
+# frozen-string-literal: true
+#
 # The mssql_emulate_lateral_with_apply extension converts
 # queries that use LATERAL into queries that use CROSS/OUTER
 # APPLY, allowing code that works on databases that support
-# LATERAL via Dataset#lateral to run on Microsoft SQL Server.
+# LATERAL via Dataset#lateral to run on Microsoft SQL Server
+# and Sybase SQLAnywhere.
 #
 # This is available as a separate extension instead of
-# integrated into the Microsoft SQL Server support because
-# few people need it and there is a performance hit to
-# code that doesn't use it.
+# integrated into the Microsoft SQL Server and Sybase
+# SQLAnywhere support because few people need it and there
+# is a performance hit to code that doesn't use it.
 #
 # It is possible there are cases where this emulation does
 # not work.  Users should probably verify that correct
@@ -20,7 +23,10 @@
 # Or you can load it into all of a database's datasets:
 #
 #   DB.extension(:mssql_emulate_lateral_with_apply)
+#
+# Related module: Sequel::MSSQL::EmulateLateralWithApply
 
+#
 module Sequel
   module MSSQL
     module EmulateLateralWithApply
@@ -57,7 +63,7 @@ module Sequel
         ds = from(*source)
         lateral.each do |l|
           l = if l.is_a?(Sequel::SQL::AliasedExpression)
-            l.expression.clone(:lateral=>nil).as(l.aliaz)
+            l.expression.clone(:lateral=>nil).as(l.alias)
           else
             l.clone(:lateral=>nil)
           end

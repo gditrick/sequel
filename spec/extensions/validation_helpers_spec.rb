@@ -1,10 +1,11 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "Sequel::Plugins::ValidationHelpers" do
   before do
     @c = Class.new(Sequel::Model) do
       def self.set_validations(&block)
         define_method(:validate, &block)
+        alias_method(:validate, :validate)
       end
       columns :value
     end
@@ -12,117 +13,108 @@ describe "Sequel::Plugins::ValidationHelpers" do
     @m = @c.new
   end
 
-  specify "should take an :allow_blank option" do
+  it "should take an :allow_blank option" do
     @c.set_validations{validates_format(/.+_.+/, :value, :allow_blank=>true)}
     @m.value = 'abc_'
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '1_1'
-    @m.should be_valid
+    @m.must_be :valid?
+    o = String.new
+    o.singleton_class.send(:undef_method, :blank?)
+    @m.value = o
+    @m.must_be :valid?
     o = Object.new
     @m.value = o
-    @m.should_not be_valid
+    @m.wont_be :valid?
     def o.blank?
       true
     end
-    @m.should be_valid
+    @m.must_be :valid?
   end
 
-  specify "should take an :allow_missing option" do
+  it "should take an :allow_missing option" do
     @c.set_validations{validates_format(/.+_.+/, :value, :allow_missing=>true)}
     @m.values.clear
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = nil
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '1_1'
-    @m.should be_valid
+    @m.must_be :valid?
   end
 
-  specify "should take an :allow_nil option" do
+  it "should take an :allow_nil option" do
     @c.set_validations{validates_format(/.+_.+/, :value, :allow_nil=>true)}
     @m.value = 'abc_'
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '1_1'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = nil
-    @m.should be_valid
+    @m.must_be :valid?
   end
 
-  specify "should take a :message option" do
+  it "should take a :message option" do
     @c.set_validations{validates_format(/.+_.+/, :value, :message=>"is so blah")}
     @m.value = 'abc_'
-    @m.should_not be_valid
-    @m.errors.full_messages.should == ['value is so blah']
+    @m.wont_be :valid?
+    @m.errors.full_messages.must_equal ['value is so blah']
     @m.value = '1_1'
-    @m.should be_valid
+    @m.must_be :valid?
   end
   
-  specify "should allow a proc for the :message option" do
+  it "should take a :from=>:values option to lookup in values hash" do
+    @c.set_validations{validates_max_length(50, :value, :from=>:values)}
+    @c.send(:define_method, :value){super() * 2}
+    @m.value = ' ' * 26
+    @m.must_be :valid?
+  end
+  
+  it "should take an :skip_invalid option to not validate a column that already has an error" do
+    @c.set_validations{validates_not_null(:value); validates_not_null(:value, :skip_invalid=>true)}
+    @m.wont_be :valid?
+    @m.errors.on(:value).must_equal ['is not present']
+  end
+
+  it "should add validation errors even if columns that already have an error" do
+    @c.set_validations{validates_not_null(:value); validates_not_null(:value)}
+    @m.wont_be :valid?
+    @m.errors.on(:value).must_equal ['is not present', 'is not present']
+  end
+
+  it "should allow a proc for the :message option" do
     @c.set_validations{validates_format(/.+_.+/, :value, :message=>proc{|f| "doesn't match #{f.inspect}"})}
     @m.value = 'abc_'
-    @m.should_not be_valid
-    @m.errors.should == {:value=>["doesn't match /.+_.+/"]}
+    @m.wont_be :valid?
+    @m.errors.must_equal(:value=>["doesn't match /.+_.+/"])
   end
 
-  specify "should take multiple attributes in the same call" do
+  it "should take multiple attributes in the same call" do
     @c.columns :value, :value2
     @c.set_validations{validates_presence([:value, :value2])}
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = 1
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value2 = 1
-    @m.should be_valid
+    @m.must_be :valid?
   end
   
-  specify "should support modifying default options for all models" do
+  it "should support modifying default validation options for a particular model" do
     @c.set_validations{validates_presence(:value)}
-    @m.should_not be_valid
-    @m.errors.should == {:value=>['is not present']}
-    o = Sequel::Plugins::ValidationHelpers::DEFAULT_OPTIONS[:presence].dup
-    Sequel::Plugins::ValidationHelpers::DEFAULT_OPTIONS[:presence][:message] = lambda{"was not entered"}
-    @m.should_not be_valid
-    @m.errors.should == {:value=>["was not entered"]}
-    @m.value = 1
-    @m.should be_valid
-    
-    @m.values.clear
-    Sequel::Plugins::ValidationHelpers::DEFAULT_OPTIONS[:presence][:allow_missing] = true
-    @m.should be_valid
-    @m.value = nil
-    @m.should_not be_valid
-    @m.errors.should == {:value=>["was not entered"]}
-
-    
-    c = Class.new(Sequel::Model)
-    c.class_eval do
-      plugin :validation_helpers
-      set_columns([:value])
-      def validate
-        validates_presence(:value)
-      end
-    end
-    m = c.new(:value=>nil)
-    m.should_not be_valid
-    m.errors.should == {:value=>["was not entered"]}
-    Sequel::Plugins::ValidationHelpers::DEFAULT_OPTIONS[:presence] = o
-  end
-  
-  specify "should support modifying default validation options for a particular model" do
-    @c.set_validations{validates_presence(:value)}
-    @m.should_not be_valid
-    @m.errors.should == {:value=>['is not present']}
+    @m.wont_be :valid?
+    @m.errors.must_equal(:value=>['is not present'])
     @c.class_eval do
+      private
       def default_validation_helpers_options(type)
         {:allow_missing=>true, :message=>proc{'was not entered'}}
       end
     end
     @m.value = nil
-    @m.should_not be_valid
-    @m.errors.should == {:value=>["was not entered"]}
+    @m.wont_be :valid?
+    @m.errors.must_equal(:value=>["was not entered"])
     @m.value = 1
-    @m.should be_valid
+    @m.must_be :valid?
     
     @m.values.clear
-    @m.should be_valid
+    @m.must_be :valid?
     
     c = Class.new(Sequel::Model)
     c.class_eval do
@@ -133,384 +125,458 @@ describe "Sequel::Plugins::ValidationHelpers" do
       end
     end
     m = c.new
-    m.should_not be_valid
-    m.errors.should == {:value=>['is not present']}
+    m.wont_be :valid?
+    m.errors.must_equal(:value=>['is not present'])
   end
 
-  specify "should support validates_exact_length" do
+  it "should support validates_exact_length" do
     @c.set_validations{validates_exact_length(3, :value)}
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '123'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '12'
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '1234'
-    @m.should_not be_valid
+    @m.wont_be :valid?
   end
   
-  specify "should support validate_format" do
+  it "should support validate_format" do
     @c.set_validations{validates_format(/.+_.+/, :value)}
     @m.value = 'abc_'
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = 'abc_def'
-    @m.should be_valid
+    @m.must_be :valid?
   end
   
-  specify "should support validates_includes with an array" do
+  it "should support validates_includes with an array" do
     @c.set_validations{validates_includes([1,2], :value)}
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = 1
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = 1.5
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = 2
-    @m.should be_valid    
+    @m.must_be :valid?    
     @m.value = 3
-    @m.should_not be_valid 
+    @m.wont_be :valid? 
   end
   
-  specify "should support validates_includes with a range" do
+  it "should support validates_includes with a range" do
     @c.set_validations{validates_includes(1..4, :value)}
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = 1
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = 1.5
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = 0
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = 5
-    @m.should_not be_valid    
+    @m.wont_be :valid?    
   end
   
-  specify "should supports validates_integer" do
+  it "should supports validates_integer" do
     @c.set_validations{validates_integer(:value)}
     @m.value = 'blah'
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '123'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '123.1231'
-    @m.should_not be_valid
+    @m.wont_be :valid?
   end
   
-  specify "should support validates_length_range" do
+  it "should support validates_length_range" do
     @c.set_validations{validates_length_range(2..5, :value)}
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '12345'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '1'
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '123456'
-    @m.should_not be_valid
+    @m.wont_be :valid?
   end
 
-  specify "should support validates_max_length" do
+  it "should support validates_max_length" do
     @c.set_validations{validates_max_length(5, :value)}
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '12345'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '123456'
-    @m.should_not be_valid
-    @m.errors[:value].should == ['is longer than 5 characters']
+    @m.wont_be :valid?
+    @m.errors[:value].must_equal ['is longer than 5 characters']
     @m.value = nil
-    @m.should_not be_valid
-    @m.errors[:value].should == ['is not present']
+    @m.wont_be :valid?
+    @m.errors[:value].must_equal ['is not present']
   end
 
-  specify "should support validates_max_length with nil value" do
+  it "should support validates_max_length with nil value" do
     @c.set_validations{validates_max_length(5, :value, :message=>'tl', :nil_message=>'np')}
     @m.value = '123456'
-    @m.should_not be_valid
-    @m.errors[:value].should == ['tl']
+    @m.wont_be :valid?
+    @m.errors[:value].must_equal ['tl']
     @m.value = nil
-    @m.should_not be_valid
-    @m.errors[:value].should == ['np']
+    @m.wont_be :valid?
+    @m.errors[:value].must_equal ['np']
   end
 
-  specify "should support validates_min_length" do
+  it "should support validates_min_length" do
     @c.set_validations{validates_min_length(5, :value)}
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '12345'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '1234'
-    @m.should_not be_valid
+    @m.wont_be :valid?
   end
 
-  specify "should support validates_schema_types" do
+  it "should support validates_max_value" do
+    @c.set_validations{validates_max_value(5, :value)}
+    @m.must_be :valid?
+
+    @m.value = 6
+    @m.wont_be :valid?
+    @m.errors[:value].must_equal ['is greater than maximum allowed value']
+
+    @m.value = 5
+    @m.must_be :valid?
+  end
+
+  it "should support validates_min_value" do
+    @c.set_validations{validates_min_value(7, :value)}
+    @m.must_be :valid?
+
+    @m.value = 6
+    @m.wont_be :valid?
+    @m.errors[:value].must_equal ['is less than minimum allowed value']
+
+    @m.value = 7
+    @m.must_be :valid?
+  end
+
+  it "should support validates_schema_types" do
     @c.set_validations{validates_schema_types}
     @m.value = 123
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '123'
-    @m.should be_valid
-    @m.meta_def(:db_schema){{:value=>{:type=>:integer}}}
-    @m.should_not be_valid
-    @m.errors.full_messages.should == ['value is not a valid integer']
+    @m.must_be :valid?
+    def @m.db_schema; {:value=>{:type=>:integer}} end
+    @m.singleton_class.send(:alias_method, :db_schema, :db_schema)
+    @m.wont_be :valid?
+    @m.errors.full_messages.must_equal ['value is not a valid integer']
 
     @c.set_validations{validates_schema_types(:value)}
-    @m.meta_def(:db_schema){{:value=>{:type=>:integer}}}
-    @m.should_not be_valid
-    @m.errors.full_messages.should == ['value is not a valid integer']
+    def @m.db_schema; {:value=>{:type=>:integer}} end
+    @m.singleton_class.send(:alias_method, :db_schema, :db_schema)
+    @m.wont_be :valid?
+    @m.errors.full_messages.must_equal ['value is not a valid integer']
 
     @c.set_validations{validates_schema_types(:value, :message=>'is bad')}
-    @m.meta_def(:db_schema){{:value=>{:type=>:integer}}}
-    @m.should_not be_valid
-    @m.errors.full_messages.should == ['value is bad']
+    def @m.db_schema; {:value=>{:type=>:integer}} end
+    @m.wont_be :valid?
+    @m.errors.full_messages.must_equal ['value is bad']
   end
 
-  specify "should support validates_numeric" do
+  it "should support validates_numeric" do
     @c.set_validations{validates_numeric(:value)}
     @m.value = 'blah'
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = '123'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '123.1231'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '+1'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '-1'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '+1.123'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '-0.123'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '-0.123E10'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '32.123e10'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '+32.123E10'
-    @m.should be_valid
-    @m.should be_valid
+    @m.must_be :valid?
+    @m.must_be :valid?
     @m.value = '.0123'
   end
   
-  specify "should support validates_type" do
+  it "should support validates_type" do
     @c.set_validations{validates_type(Integer, :value)}
     @m.value = 123
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = '123'
-    @m.should_not be_valid
-    @m.errors.full_messages.should == ['value is not a valid integer']
+    @m.wont_be :valid?
+    @m.errors.full_messages.must_equal ['value is not a valid integer']
     
     @c.set_validations{validates_type(:String, :value)}
     @m.value = '123'
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = 123
-    @m.should_not be_valid
-    @m.errors.full_messages.should == ['value is not a valid string']
+    @m.wont_be :valid?
+    @m.errors.full_messages.must_equal ['value is not a valid string']
     
     @c.set_validations{validates_type('Integer', :value)}
     @m.value = 123
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = 123.05
-    @m.should_not be_valid
-    @m.errors.full_messages.should == ['value is not a valid integer']
+    @m.wont_be :valid?
+    @m.errors.full_messages.must_equal ['value is not a valid integer']
     
     @c.set_validations{validates_type(Integer, :value)}
     @m.value = 1
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = false
-    @m.should_not be_valid
+    @m.wont_be :valid?
     
     @c.set_validations{validates_type([Integer, Float], :value)}
     @m.value = 1
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = 1.0
-    @m.should be_valid
-    @m.value = BigDecimal.new('1.0')
-    @m.should_not be_valid
-    @m.errors.full_messages.should == ['value is not a valid integer or float']
+    @m.must_be :valid?
+    @m.value = BigDecimal('1.0')
+    @m.wont_be :valid?
+    @m.errors.full_messages.must_equal ['value is not a valid integer or float']
   end
 
-  specify "should support validates_not_null" do
+  it "should support validates_not_null" do
     @c.set_validations{validates_not_null(:value)}
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = ''
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = 1234
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = nil
-    @m.should_not be_valid
+    @m.wont_be :valid?
     @m.value = true
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = false
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = Time.now
-    @m.should be_valid
+    @m.must_be :valid?
   end
   
-  specify "should support validates_presence" do
-    @c.set_validations{validates_presence(:value)}
-    @m.should_not be_valid
+  it "should support validates_no_null_byte" do
+    @c.set_validations{validates_no_null_byte(:value)}
+    @m.must_be :valid?
     @m.value = ''
-    @m.should_not be_valid
+    @m.must_be :valid?
     @m.value = 1234
-    @m.should be_valid
-    @m.value = nil
-    @m.should_not be_valid
+    @m.must_be :valid?
+    @m.value = "asdfasl\0asdf"
+    @m.wont_be :valid?
     @m.value = true
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = false
-    @m.should be_valid
+    @m.must_be :valid?
     @m.value = Time.now
-    @m.should be_valid
+    @m.must_be :valid?
+  end
+  
+  it "should support validates_presence" do
+    @c.set_validations{validates_presence(:value)}
+    @m.wont_be :valid?
+    @m.value = ''
+    @m.wont_be :valid?
+    @m.value = 1234
+    @m.must_be :valid?
+    @m.value = nil
+    @m.wont_be :valid?
+    @m.value = true
+    @m.must_be :valid?
+    @m.value = false
+    @m.must_be :valid?
+    @m.value = Time.now
+    @m.must_be :valid?
   end
   
   it "should support validates_unique with a single attribute" do
     @c.columns(:id, :username, :password)
     @c.set_dataset DB[:items]
-    @c.set_validations{validates_unique(:username)}
-    @c.dataset._fetch = proc do |sql|
+    @c.set_validations{validates_unique(:username, :only_if_modified=>false)}
+    @c.dataset = @c.dataset.with_fetch(proc do |sql|
       case sql
-      when /count.*username = '0records'/
-        {:v => 0}
-      when /count.*username = '1record'/
+      when /1 AS one.*username = '0records'/
+        {:v => nil}
+      when /1 AS one.*username = '1record'/
         {:v => 1}
       end
-    end
+    end)
     
     @user = @c.new(:username => "0records", :password => "anothertest")
-    @user.should be_valid
+    @user.must_be :valid?
     @user = @c.load(:id=>3, :username => "0records", :password => "anothertest")
-    @user.should be_valid
+    @user.must_be :valid?
 
     DB.sqls
     @user = @c.new(:password => "anothertest")
-    @user.should be_valid
-    DB.sqls.should == []
+    @user.must_be :valid?
+    DB.sqls.must_equal []
 
     @user = @c.new(:username => "1record", :password => "anothertest")
-    @user.should_not be_valid
-    @user.errors.full_messages.should == ['username is already taken']
+    @user.wont_be :valid?
+    @user.errors.full_messages.must_equal ['username is already taken']
     @user = @c.load(:id=>4, :username => "1record", :password => "anothertest")
-    @user.should_not be_valid
-    @user.errors.full_messages.should == ['username is already taken']
-
-    ds1 = @c.dataset.filter([[:username, '0records']])
-    ds2 = ds1.exclude(:id=>1)
-    @c.dataset.should_receive(:where).with([[:username, '0records']]).twice.and_return(ds1)
-    ds1.should_receive(:exclude).with(:id=>1).once.and_return(ds2)
+    @user.wont_be :valid?
+    @user.errors.full_messages.must_equal ['username is already taken']
 
     @user = @c.load(:id=>1, :username => "0records", :password => "anothertest")
-    @user.should be_valid
-    DB.sqls.last.should == "SELECT count(*) AS count FROM items WHERE ((username = '0records') AND (id != 1)) LIMIT 1"
+    @user.must_be :valid?
+    DB.sqls.last.must_equal "SELECT 1 AS one FROM items WHERE ((username = '0records') AND (id != 1)) LIMIT 1"
     @user = @c.new(:username => "0records", :password => "anothertest")
-    @user.should be_valid
-    DB.sqls.last.should == "SELECT count(*) AS count FROM items WHERE (username = '0records') LIMIT 1"
+    @user.must_be :valid?
+    DB.sqls.last.must_equal "SELECT 1 AS one FROM items WHERE (username = '0records') LIMIT 1"
   end
   
   it "should support validates_unique with multiple attributes" do
     @c.columns(:id, :username, :password)
     @c.set_dataset DB[:items]
-    @c.set_validations{validates_unique([:username, :password])}
-    @c.dataset._fetch = proc do |sql|
+    @c.set_validations{validates_unique([:username, :password], :only_if_modified=>false)}
+    @c.dataset = @c.dataset.with_fetch(proc do |sql|
       case sql
-      when /count.*username = '0records'/
-        {:v => 0}
-      when /count.*username = '1record'/
+      when /1 AS one.*username = '0records'/
+        {:v => nil}
+      when /1 AS one.*username = '1record'/
         {:v => 1}
       end
-    end
+    end)
     
     @user = @c.new(:username => "0records", :password => "anothertest")
-    @user.should be_valid
+    @user.must_be :valid?
     @user = @c.load(:id=>3, :username => "0records", :password => "anothertest")
-    @user.should be_valid
+    @user.must_be :valid?
 
     DB.sqls
     @user = @c.new(:password => "anothertest")
-    @user.should be_valid
-    @user.errors.full_messages.should == []
+    @user.must_be :valid?
+    @user.errors.full_messages.must_equal []
     @user = @c.new(:username => "0records")
-    @user.should be_valid
-    @user.errors.full_messages.should == []
+    @user.must_be :valid?
+    @user.errors.full_messages.must_equal []
     @user = @c.new
-    @user.should be_valid
-    @user.errors.full_messages.should == []
-    DB.sqls.should == []
+    @user.must_be :valid?
+    @user.errors.full_messages.must_equal []
+    DB.sqls.must_equal []
 
     @user = @c.new(:username => "1record", :password => "anothertest")
-    @user.should_not be_valid
-    @user.errors.full_messages.should == ['username and password is already taken']
+    @user.wont_be :valid?
+    @user.errors.full_messages.must_equal ['username and password is already taken']
     @user = @c.load(:id=>4, :username => "1record", :password => "anothertest")
-    @user.should_not be_valid
-    @user.errors.full_messages.should == ['username and password is already taken']
-
-    ds1 = @c.dataset.filter([[:username, '0records'], [:password, 'anothertest']])
-    ds2 = ds1.exclude(:id=>1)
-    @c.dataset.should_receive(:where).with([[:username, '0records'], [:password, 'anothertest']]).twice.and_return(ds1)
-    ds1.should_receive(:exclude).with(:id=>1).once.and_return(ds2)
+    @user.wont_be :valid?
+    @user.errors.full_messages.must_equal ['username and password is already taken']
 
     @user = @c.load(:id=>1, :username => "0records", :password => "anothertest")
-    @user.should be_valid
-    DB.sqls.last.should == "SELECT count(*) AS count FROM items WHERE ((username = '0records') AND (password = 'anothertest') AND (id != 1)) LIMIT 1"
+    @user.must_be :valid?
+    DB.sqls.last.must_equal "SELECT 1 AS one FROM items WHERE ((username = '0records') AND (password = 'anothertest') AND (id != 1)) LIMIT 1"
     @user = @c.new(:username => "0records", :password => "anothertest")
-    @user.should be_valid
-    DB.sqls.last.should == "SELECT count(*) AS count FROM items WHERE ((username = '0records') AND (password = 'anothertest')) LIMIT 1"
+    @user.must_be :valid?
+    DB.sqls.last.must_equal "SELECT 1 AS one FROM items WHERE ((username = '0records') AND (password = 'anothertest')) LIMIT 1"
   end
 
   it "should support validates_unique with a block" do
     @c.columns(:id, :username, :password)
     @c.set_dataset DB[:items]
-    @c.set_validations{validates_unique(:username){|ds| ds.filter(:active)}}
-    @c.dataset._fetch = {:v=>0}
+    @c.set_validations{validates_unique(:username, :only_if_modified=>false){|ds| ds.filter(:active)}}
+    @c.dataset = @c.dataset.with_fetch(:v=>nil)
     
     DB.reset
-    @c.new(:username => "0records", :password => "anothertest").should be_valid
-    @c.load(:id=>3, :username => "0records", :password => "anothertest").should be_valid
-    DB.sqls.should == ["SELECT count(*) AS count FROM items WHERE ((username = '0records') AND active) LIMIT 1",
-                    "SELECT count(*) AS count FROM items WHERE ((username = '0records') AND active AND (id != 3)) LIMIT 1"]
+    @c.new(:username => "0records", :password => "anothertest").must_be :valid?
+    @c.load(:id=>3, :username => "0records", :password => "anothertest").must_be :valid?
+    DB.sqls.must_equal ["SELECT 1 AS one FROM items WHERE ((username = '0records') AND active) LIMIT 1",
+                    "SELECT 1 AS one FROM items WHERE ((username = '0records') AND active AND (id != 3)) LIMIT 1"]
   end
 
-  it "should support validates_unique with a custom filter" do
+  it "should support validates_unique with :where option" do
     @c.columns(:id, :username, :password)
     @c.set_dataset DB[:items]
-    @c.set_validations{validates_unique(:username, :where=>proc{|ds, obj, cols| ds.where(cols.map{|c| [Sequel.function(:lower, c), obj.send(c).downcase]})})}
-    @c.dataset._fetch = {:v=>0}
-    
+    @c.set_validations{validates_unique(:username, :only_if_modified=>false, :where=>proc{|ds, obj, cols| ds.where(cols.map{|c| [Sequel.function(:lower, c), obj.send(c).downcase]})})}
+    @c.dataset = @c.dataset.with_fetch(:v=>nil)
+      
     DB.reset
-    @c.new(:username => "0RECORDS", :password => "anothertest").should be_valid
-    @c.load(:id=>3, :username => "0RECORDS", :password => "anothertest").should be_valid
-    DB.sqls.should == ["SELECT count(*) AS count FROM items WHERE (lower(username) = '0records') LIMIT 1",
-                    "SELECT count(*) AS count FROM items WHERE ((lower(username) = '0records') AND (id != 3)) LIMIT 1"]
+    @c.new(:username => "0RECORDS", :password => "anothertest").must_be :valid?
+    @c.load(:id=>3, :username => "0RECORDS", :password => "anothertest").must_be :valid?
+    DB.sqls.must_equal ["SELECT 1 AS one FROM items WHERE (lower(username) = '0records') LIMIT 1",
+                    "SELECT 1 AS one FROM items WHERE ((lower(username) = '0records') AND (id != 3)) LIMIT 1"]
   end
 
-  it "should support :only_if_modified option for validates_unique, and not check uniqueness for existing records if values haven't changed" do
+  it "should support validates_unique with :dataset option" do
     @c.columns(:id, :username, :password)
     @c.set_dataset DB[:items]
-    @c.set_validations{validates_unique([:username, :password], :only_if_modified=>true)}
-    @c.dataset._fetch = {:v=>0}
+    c = @c
+    @c.set_validations{validates_unique(:username, :only_if_modified=>false, :dataset=>c.where(:a=>[1,2,3]))}
+    @c.dataset = @c.dataset.with_fetch(:v=>nil)
     
     DB.reset
-    @c.new(:username => "0records", :password => "anothertest").should be_valid
-    DB.sqls.should == ["SELECT count(*) AS count FROM items WHERE ((username = '0records') AND (password = 'anothertest')) LIMIT 1"]
+    @c.new(:username => "0records", :password => "anothertest").must_be :valid?
+    @c.load(:id=>3, :username => "0records", :password => "anothertest").must_be :valid?
+    DB.sqls.must_equal ["SELECT 1 AS one FROM items WHERE ((a IN (1, 2, 3)) AND (username = '0records')) LIMIT 1",
+                    "SELECT 1 AS one FROM items WHERE ((a IN (1, 2, 3)) AND (username = '0records') AND (id != 3)) LIMIT 1"]
+  end
+
+  it "should use qualified primary keys for validates_unique when the dataset is joined" do
+    @c.columns(:id, :username, :password)
+    @c.set_dataset DB[:items]
+    c = @c
+    @c.set_validations{validates_unique(:username, :only_if_modified=>false, :dataset=>c.cross_join(:a))}
+    @c.dataset = @c.dataset.with_fetch(:v=>nil)
+    
+    DB.reset
+    @c.new(:username => "0records", :password => "anothertest").must_be :valid?
+    @c.load(:id=>3, :username => "0records", :password => "anothertest").must_be :valid?
+    DB.sqls.must_equal ["SELECT 1 AS one FROM items CROSS JOIN a WHERE (username = '0records') LIMIT 1",
+                    "SELECT 1 AS one FROM items CROSS JOIN a WHERE ((username = '0records') AND (items.id != 3)) LIMIT 1"]
+  end
+
+  it "should not have validates_unique check uniqueness for existing records if values haven't changed" do
+    @c.columns(:id, :username, :password)
+    @c.set_dataset DB[:items]
+    @c.set_validations{validates_unique([:username, :password])}
+    @c.dataset = @c.dataset.with_fetch(:v=>nil)
+    
+    DB.reset
+    @c.new(:username => "0records", :password => "anothertest").must_be :valid?
+    DB.sqls.must_equal ["SELECT 1 AS one FROM items WHERE ((username = '0records') AND (password = 'anothertest')) LIMIT 1"]
     DB.reset
     m = @c.load(:id=>3, :username => "0records", :password => "anothertest")
-    m.should be_valid
-    DB.sqls.should == []
+    m.must_be :valid?
+    DB.sqls.must_equal []
 
     m.username = '1'
-    m.should be_valid
-    DB.sqls.should == ["SELECT count(*) AS count FROM items WHERE ((username = '1') AND (password = 'anothertest') AND (id != 3)) LIMIT 1"]
+    m.must_be :valid?
+    DB.sqls.must_equal ["SELECT 1 AS one FROM items WHERE ((username = '1') AND (password = 'anothertest') AND (id != 3)) LIMIT 1"]
 
     m = @c.load(:id=>3, :username => "0records", :password => "anothertest")
     DB.reset
     m.password = '1'
-    m.should be_valid
-    DB.sqls.should == ["SELECT count(*) AS count FROM items WHERE ((username = '0records') AND (password = '1') AND (id != 3)) LIMIT 1"]
+    m.must_be :valid?
+    DB.sqls.must_equal ["SELECT 1 AS one FROM items WHERE ((username = '0records') AND (password = '1') AND (id != 3)) LIMIT 1"]
     DB.reset
     m.username = '2'
-    m.should be_valid
-    DB.sqls.should == ["SELECT count(*) AS count FROM items WHERE ((username = '2') AND (password = '1') AND (id != 3)) LIMIT 1"]
+    m.must_be :valid?
+    DB.sqls.must_equal ["SELECT 1 AS one FROM items WHERE ((username = '2') AND (password = '1') AND (id != 3)) LIMIT 1"]
   end
 
   it "should not attempt a database query if the underlying columns have validation errors" do
     @c.columns(:id, :username, :password)
     @c.set_dataset DB[:items]
     @c.set_validations{errors.add(:username, 'foo'); validates_unique([:username, :password])}
-    @c.dataset._fetch = {:v=>0}
+    @c.dataset = @c.dataset.with_fetch(:v=>0)
     
     DB.reset
     m = @c.new(:username => "1", :password => "anothertest")
-    m.should_not be_valid
-    DB.sqls.should == []
+    m.wont_be :valid?
+    DB.sqls.must_equal []
+  end
+
+  it "should support validates_operator" do
+    @c.set_validations{validates_operator(:>, 3, :value)}
+    @m.value = 1
+    @m.wont_be :valid?
+    @m.errors.full_messages.must_equal ['value is not > 3']
+    @m.value = 3
+    @m.wont_be :valid?
+    @m.value = nil
+    @m.wont_be :valid?
+    @m.value = 4
+    @m.must_be :valid?
   end
 end 

@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
     # This plugin allows you to add filters on a per object basis that
@@ -5,7 +7,9 @@ module Sequel
     # where you would normally have to drop down to the dataset level
     # to get the necessary control, because you only want to delete or
     # update the rows in certain cases based on the current status of
-    # the row in the database.
+    # the row in the database.  The main purpose of this plugin is to
+    # avoid race conditions by relying on the atomic properties of database
+    # transactions.
     # 
     #   class Item < Sequel::Model
     #     plugin :instance_filters
@@ -13,12 +17,12 @@ module Sequel
     #
     #   # These are two separate objects that represent the same
     #   # database row. 
-    #   i1 = Item.first(:id=>1, :delete_allowed=>false)
-    #   i2 = Item.first(:id=>1, :delete_allowed=>false)
+    #   i1 = Item.first(id: 1, delete_allowed: false)
+    #   i2 = Item.first(id: 1, delete_allowed: false)
     #
     #   # Add an instance filter to the object. This filter is in effect
     #   # until the object is successfully updated or deleted.
-    #   i1.instance_filter(:delete_allowed=>true)
+    #   i1.instance_filter(delete_allowed: true)
     #
     #   # Attempting to delete the object where the filter doesn't
     #   # match any rows raises an error.
@@ -26,7 +30,7 @@ module Sequel
     #
     #   # The other object that represents the same row has no
     #   # instance filters, and can be updated normally.
-    #   i2.update(:delete_allowed=>true)
+    #   i2.update(delete_allowed: true)
     #
     #   # Even though the filter is now still in effect, since the
     #   # database row has been updated to allow deleting,
@@ -59,15 +63,6 @@ module Sequel
           clear_instance_filters
         end
 
-        # Duplicate internal structures when duplicating model instance.
-        def dup
-          ifs = instance_filters.dup
-          super.instance_eval do
-            @instance_filters = ifs
-            self
-          end
-        end
-      
         # Freeze the instance filters when freezing the object
         def freeze
           instance_filters.freeze
@@ -93,6 +88,13 @@ module Sequel
           end
         end
 
+        # Duplicate internal structures when duplicating model instance.
+        def initialize_copy(other)
+          super
+          @instance_filters = other.send(:instance_filters).dup
+          self
+        end
+      
         # Lazily initialize the instance filter array.
         def instance_filters
           @instance_filters ||= []
@@ -100,7 +102,7 @@ module Sequel
         
         # Apply the instance filters to the given dataset
         def apply_instance_filters(ds)
-          instance_filters.inject(ds){|ds1, i| ds1.filter(*i[0], &i[1])}
+          instance_filters.inject(ds){|ds1, i| ds1.where(*i[0], &i[1])}
         end
         
         # Clear the instance filters.
@@ -121,10 +123,10 @@ module Sequel
         # Only use prepared statements for update and delete queries
         # if there are no instance filters.
         def use_prepared_statements_for?(type)
-          if (type == :update || type == :delete) && !instance_filters.empty?
+          if type == :update && !instance_filters.empty?
             false
           else
-            super
+            super if defined?(super)
           end
         end
       end

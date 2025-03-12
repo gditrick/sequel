@@ -1,28 +1,29 @@
-require 'rubygems'
-
-if defined?(RSpec)
-  begin
-    require 'rspec/expectations'
-  rescue LoadError
-    nil
-  end
-end
-
 if ENV['COVERAGE']
-  require File.join(File.dirname(File.expand_path(__FILE__)), "../sequel_coverage")
+  require_relative "../sequel_coverage"
   SimpleCov.sequel_coverage(:filter=>%r{lib/sequel/(extensions|plugins)/\w+\.rb\z})
 end
 
-unless Object.const_defined?('Sequel') && Sequel.const_defined?('Model')
-  $:.unshift(File.join(File.dirname(File.expand_path(__FILE__)), "../../lib/"))
-  require 'sequel'
+ENV['MT_NO_PLUGINS'] = '1' # Work around stupid autoloading of plugins
+gem 'minitest'
+require 'minitest/global_expectations/autorun'
+require 'minitest/hooks/default'
+
+$:.unshift(File.join(File.dirname(File.expand_path(__FILE__)), "../../lib/"))
+require_relative "../../lib/sequel"
+
+require_relative "../visibility_checking_after_hook" if ENV['CHECK_METHOD_VISIBILITY']
+
+require_relative '../deprecation_helper'
+
+if ENV['SEQUEL_TZINFO_VERSION']
+  # Allow forcing specific TZInfo versions, useful when testing
+  gem 'tzinfo', ENV['SEQUEL_TZINFO_VERSION']
 end
-Sequel::Deprecation.backtrace_filter = lambda{|line, lineno| lineno < 4 || line =~ /_spec\.rb/}
-SEQUEL_EXTENSIONS_NO_DEPRECATION_WARNING = true
 
 begin
   # Attempt to load ActiveSupport blank extension and inflector first, so Sequel
   # can override them.
+  require 'active_support'
   require 'active_support/core_ext/object/blank'
   require 'active_support/inflector'
   require 'active_support/core_ext/string/inflections'
@@ -30,36 +31,9 @@ rescue LoadError
   nil
 end
 
-Sequel.extension :meta_def
-Sequel.extension :core_refinements if RUBY_VERSION >= '2.0.0'
-
-def skip_warn(s)
-  warn "Skipping test of #{s}" if ENV["SKIPPED_TEST_WARN"]
+if (RUBY_VERSION >= '2.0.0' && RUBY_ENGINE == 'ruby') || (RUBY_ENGINE == 'jruby' && (JRUBY_VERSION >= '9.3' || (JRUBY_VERSION.match(/\A9\.2\.(\d+)/) && $1.to_i >= 7)))
+  Sequel.extension :core_refinements
 end
-
-(defined?(RSpec) ? RSpec::Core::ExampleGroup : Spec::Example::ExampleGroup).class_eval do
-  if ENV['SEQUEL_DEPRECATION_WARNINGS']
-    class << self
-      alias qspecify specify
-    end
-  else
-    def self.qspecify(*a, &block)
-      specify(*a) do
-        begin
-          output = Sequel::Deprecation.output
-          Sequel::Deprecation.output = false
-          instance_exec(&block)
-        ensure
-          Sequel::Deprecation.output = output 
-        end
-      end
-    end
-  end
-end
-
-Sequel.quote_identifiers = false
-Sequel.identifier_input_method = nil
-Sequel.identifier_output_method = nil
 
 class << Sequel::Model
   attr_writer :db_schema
@@ -67,7 +41,8 @@ class << Sequel::Model
   def columns(*cols)
     return super if cols.empty?
     define_method(:columns){cols}
-    @dataset.instance_variable_set(:@columns, cols) if @dataset
+    alias_method(:columns, :columns)
+    @dataset.send(:columns=, cols) if @dataset
     def_column_accessor(*cols)
     @columns = cols
     @db_schema = {}
@@ -75,17 +50,23 @@ class << Sequel::Model
   end
 end
 
+Sequel::DB = nil
 Sequel::Model.use_transactions = false
-Sequel.cache_anonymous_models = false
+Sequel::Model.cache_anonymous_models = false
 
 db = Sequel.mock(:fetch=>{:id => 1, :x => 1}, :numrows=>1, :autoid=>proc{|sql| 10})
 def db.schema(*) [[:id, {:primary_key=>true}]] end
 def db.reset() sqls end
 def db.supports_schema_parsing?() true end
 Sequel::Model.db = DB = db
+Sequel::DATABASES.clear
 
 if ENV['SEQUEL_COLUMNS_INTROSPECTION']
   Sequel.extension :columns_introspection
   Sequel::Database.extension :columns_introspection
   Sequel::Mock::Dataset.send(:include, Sequel::ColumnsIntrospection)
 end
+if ENV['SEQUEL_NO_CACHE_ASSOCIATIONS']
+  Sequel::Model.cache_associations = false
+end
+Sequel::Model.plugin :throw_failures if ENV['SEQUEL_MODEL_THROW_FAILURES']

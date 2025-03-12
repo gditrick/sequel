@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The thread_local_timezones extension allows you to set a per-thread timezone that
 # will override the default global timezone while the thread is executing.  The
 # main use case is for web applications that execute each request in its own thread,
@@ -33,7 +35,10 @@
 #   Sequel.application_timezone # => :utc
 #   Sequel.thread_application_timezone = :nil
 #   Sequel.application_timezone # => nil
+#
+# Related module: Sequel::ThreadLocalTimezones
 
+#
 module Sequel
   module ThreadLocalTimezones
     %w'application database typecast'.each do |t|

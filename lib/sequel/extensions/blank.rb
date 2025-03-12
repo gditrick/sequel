@@ -1,8 +1,18 @@
+# frozen-string-literal: true
+#
 # The blank extension adds the blank? method to all objects (e.g. Object#blank?).
 #
 # To load the extension:
 #
 #   Sequel.extension :blank
+
+[FalseClass, Object, NilClass, Numeric, String, TrueClass].each do |klass|
+  # :nocov:
+  if klass.method_defined?(:blank?)
+    klass.send(:alias_method, :blank?, :blank?)
+  end
+  # :nocov:
+end
 
 class FalseClass
   # false is always blank

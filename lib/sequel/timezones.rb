@@ -1,11 +1,23 @@
+# frozen-string-literal: true
+
 module Sequel
   @application_timezone = nil
   @database_timezone = nil
   @typecast_timezone = nil
+  @local_offsets = {}
+
+  # Backwards compatible alias
+  Timezones = SequelMethods
+  Deprecation.deprecate_constant(self, :Timezones)
   
-  # Sequel doesn't pay much attention to timezones by default, but you can set it
-  # handle timezones if you want.  There are three separate timezone settings, application_timezone,
-  # database_timezone, and typecast_timezone.  All three timezones have getter and setter methods.
+  # Sequel doesn't pay much attention to timezones by default, but you can set it to
+  # handle timezones if you want.  There are three separate timezone settings:
+  #
+  # * application_timezone
+  # * database_timezone
+  # * typecast_timezone
+  #
+  # All three timezones have getter and setter methods.
   # You can set all three timezones to the same value at once via <tt>Sequel.default_timezone=</tt>.
   #
   # The only timezone values that are supported by default are <tt>:utc</tt> (convert to UTC),
@@ -14,7 +26,7 @@ module Sequel
   # on the environment (e.g. current user), you need to use the +named_timezones+ extension (and use
   # +DateTime+ as the +datetime_class+). Sequel also ships with a +thread_local_timezones+ extensions
   # which allows each thread to have its own timezone values for each of the timezones.
-  module Timezones
+  module SequelMethods
     # The timezone you want the application to use.  This is the timezone
     # that incoming times from the database and typecasting are converted to.
     attr_reader :application_timezone
@@ -52,7 +64,14 @@ module Sequel
             convert_output_datetime_other(v, output_timezone)
           end
         else
-          v.send(output_timezone == :utc ? :getutc : :getlocal)
+          case output_timezone
+          when :utc
+            v.getutc
+          when :local
+            v.getlocal
+          else
+            convert_output_time_other(v, output_timezone)
+          end
         end
       else
         v
@@ -63,22 +82,20 @@ module Sequel
     # +application_timezone+ using +convert_input_timestamp+ and
     # +convert_output_timestamp+.
     def convert_timestamp(v, input_timezone)
-      begin
-        if v.is_a?(Date) && !v.is_a?(DateTime)
-          # Dates handled specially as they are assumed to already be in the application_timezone
-          if datetime_class == DateTime
-            DateTime.civil(v.year, v.month, v.day, 0, 0, 0, application_timezone == :local ? (defined?(Rational) ? Rational(Time.local(v.year, v.month, v.day).utc_offset, 86400) : Time.local(v.year, v.month, v.day).utc_offset/86400.0) : 0)
-          else
-            Time.send(application_timezone == :utc ? :utc : :local, v.year, v.month, v.day)
-          end
+      if v.is_a?(Date) && !v.is_a?(DateTime)
+        # Dates handled specially as they are assumed to already be in the application_timezone
+        if datetime_class == DateTime
+          DateTime.civil(v.year, v.month, v.day, 0, 0, 0, application_timezone == :local ? Rational(Time.local(v.year, v.month, v.day).utc_offset, 86400) : 0)
         else
-          convert_output_timestamp(convert_input_timestamp(v, input_timezone), application_timezone)
+          Time.public_send(application_timezone == :utc ? :utc : :local, v.year, v.month, v.day)
         end
-      rescue InvalidValue
-        raise
-      rescue => e
-        raise convert_exception_class(e, InvalidValue)
+      else
+        convert_output_timestamp(convert_input_timestamp(v, input_timezone), application_timezone)
       end
+    rescue InvalidValue
+      raise
+    rescue => e
+      raise convert_exception_class(e, InvalidValue)
     end
     
     # Convert the given object into an object of <tt>Sequel.datetime_class</tt> in the
@@ -108,7 +125,7 @@ module Sequel
     # same time and just modifying the timezone.
     def convert_input_datetime_no_offset(v, input_timezone)
       case input_timezone
-      when :utc, nil
+      when nil, :utc
         v # DateTime assumes UTC if no offset is given
       when :local
         offset = local_offset_for_datetime(v)
@@ -117,11 +134,18 @@ module Sequel
         convert_input_datetime_other(v, input_timezone)
       end
     end
-    
+
     # Convert the given +DateTime+ to the given input_timezone that is not supported
     # by default (i.e. one other than +nil+, <tt>:local</tt>, or <tt>:utc</tt>).  Raises an +InvalidValue+ by default.
     # Can be overridden in extensions.
     def convert_input_datetime_other(v, input_timezone)
+      raise InvalidValue, "Invalid input_timezone: #{input_timezone.inspect}"
+    end
+    
+    # Convert the given +Time+ to the given input_timezone that is not supported
+    # by default (i.e. one other than +nil+, <tt>:local</tt>, or <tt>:utc</tt>).  Raises an +InvalidValue+ by default.
+    # Can be overridden in extensions.
+    def convert_input_time_other(v, input_timezone)
       raise InvalidValue, "Invalid input_timezone: #{input_timezone.inspect}"
     end
     
@@ -132,29 +156,44 @@ module Sequel
       case v
       when String
         v2 = Sequel.string_to_datetime(v)
-        if !input_timezone || Date._parse(v).has_key?(:offset)
+        if !input_timezone || _date_parse(v).has_key?(:offset)
           v2
         else
           # Correct for potentially wrong offset if string doesn't include offset
           if v2.is_a?(DateTime)
-            v2 = convert_input_datetime_no_offset(v2, input_timezone)
+            convert_input_datetime_no_offset(v2, input_timezone)
           else
-            # Time assumes local time if no offset is given
-            v2 = v2.getutc + v2.utc_offset if input_timezone == :utc
+            case input_timezone
+            when nil, :local
+              v2
+            when :utc
+              (v2 + v2.utc_offset).utc
+            else
+              convert_input_time_other((v2 + v2.utc_offset).utc, input_timezone)
+            end
           end
-          v2
         end
       when Array
         y, mo, d, h, mi, s, ns, off = v
         if datetime_class == DateTime
-          s += (defined?(Rational) ? Rational(ns, 1000000000) : ns/1000000000.0) if ns
+          s += Rational(ns, 1000000000) if ns
           if off
             DateTime.civil(y, mo, d, h, mi, s, off)
           else
             convert_input_datetime_no_offset(DateTime.civil(y, mo, d, h, mi, s), input_timezone)
           end
+        elsif off
+          s += Rational(ns, 1000000000) if ns
+          Time.new(y, mo, d, h, mi, s, (off*86400).to_i)
         else
-          Time.send(input_timezone == :utc ? :utc : :local, y, mo, d, h, mi, s, (ns ? ns / 1000.0 : 0))
+          case input_timezone
+          when nil, :local
+            Time.local(y, mo, d, h, mi, s, (ns ? ns / 1000.0 : 0))
+          when :utc
+            Time.utc(y, mo, d, h, mi, s, (ns ? ns / 1000.0 : 0))
+          else
+            convert_input_time_other(Time.utc(y, mo, d, h, mi, s, (ns ? ns / 1000.0 : 0)), input_timezone)
+          end
         end
       when Hash
         ary = [:year, :month, :day, :hour, :minute, :second, :nanos].map{|x| (v[x] || v[x.to_s]).to_i}
@@ -162,30 +201,17 @@ module Sequel
           ary << offset
         end
         convert_input_timestamp(ary, input_timezone)
-        convert_input_timestamp(ary, input_timezone)
       when Time
         if datetime_class == DateTime
-          if v.respond_to?(:to_datetime)
-            v.to_datetime
-          else
-          # :nocov:
-            # Ruby 1.8 code, %N not available and %z broken on Windows
-            offset_hours, offset_minutes = (v.utc_offset/60).divmod(60)
-            string_to_datetime(v.strftime("%Y-%m-%dT%H:%M:%S") << sprintf(".%06i%+03i%02i", v.usec, offset_hours, offset_minutes))
-          # :nocov:
-          end
+          v.to_datetime
         else
           v
         end
       when DateTime
         if datetime_class == DateTime
           v
-        elsif v.respond_to?(:to_time)
-          v.to_time
         else
-        # :nocov:
-          string_to_datetime(v.strftime("%FT%T.%N%z"))
-        # :nocov:
+          v.to_time
         end
       else
         raise InvalidValue, "Invalid convert_input_timestamp type: #{v.inspect}"
@@ -199,23 +225,30 @@ module Sequel
       raise InvalidValue, "Invalid output_timezone: #{output_timezone.inspect}"
     end
     
+    # Convert the given +Time+ to the given output_timezone that is not supported
+    # by default (i.e. one other than +nil+, <tt>:local</tt>, or <tt>:utc</tt>).  Raises an +InvalidValue+ by default.
+    # Can be overridden in extensions.
+    def convert_output_time_other(v, output_timezone)
+      raise InvalidValue, "Invalid output_timezone: #{output_timezone.inspect}"
+    end
+    
     # Convert the timezone setter argument.  Returns argument given by default,
     # exists for easier overriding in extensions.
     def convert_timezone_setter_arg(tz)
       tz
     end
 
-    # Takes a DateTime dt, and returns the correct local offset for that dt, daylight savings included.
+    # Takes a DateTime dt, and returns the correct local offset for that dt, daylight savings included, in fraction of a day.
     def local_offset_for_datetime(dt)
       time_offset_to_datetime_offset Time.local(dt.year, dt.month, dt.day, dt.hour, dt.min, dt.sec).utc_offset
     end
 
     # Caches offset conversions to avoid excess Rational math.
     def time_offset_to_datetime_offset(offset_secs)
-      @local_offsets ||= {}
-      @local_offsets[offset_secs] ||= respond_to?(:Rational, true) ? Rational(offset_secs, 60*60*24) : offset_secs/60/60/24.0
+      if offset = Sequel.synchronize{@local_offsets[offset_secs]}
+        return offset
+      end
+      Sequel.synchronize{@local_offsets[offset_secs] = Rational(offset_secs, 86400)}
     end
   end
-
-  extend Timezones
 end

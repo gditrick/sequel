@@ -6,7 +6,7 @@ Sequel supports reflection information in multiple ways.
 
 You can get the adapter in use using Database#adapter_scheme:
 
-  DB.adapter_scheme # e.g. :postgres, :jdbc, :odbc
+  DB.adapter_scheme # :postgres, :jdbc, :odbc
 
 == Database Connected To
 
@@ -59,6 +59,7 @@ The hash may also contain entries for:
 Database#schema takes a table symbol and returns column information in an array with each element being an array with two elements.  The first elements of the subarray is a column symbol, and the second element is a hash of information about that column.  The hash should include the following keys:
 
 :allow_null :: Whether NULL/nil is an allowed value for this column. Used by the Sequel::Model typecasting code.
+:comment:: The comment on the column (MySQL and PostreSQL only).
 :db_type :: The type of column the database provided, as a string.  Used by the schema_dumper plugin for a more specific type translation.
 :default :: The default value of the column, as either a string or nil.  Uses a database specific format. Used by the schema_dumper plugin for converting to a ruby value.
 :primary_key :: Whether this column is one of the primary key columns for the table.  Used by the Sequel::Model code to determine primary key columns.
@@ -97,17 +98,17 @@ You can get an array of association symbols with Model.associations:
 
   Model.associations # [:association1, :association2, ...]
 
-You can get the association reflection for a single association via the Model.association_reflection.  Association reflections are subclasses of hash, for ease of use and introspection (and backwards compatibility):
+You can get the association reflection for a single association via the Model.association_reflection.  Association reflections are subclasses of hash:
 
-  Model.association_reflection(:association1) # {:name=>:association1, :type=>:many_to_one, :model=>Model, ...}
+  Model.association_reflection(:association1) # #<Sequel::Model::Associations::ManyToOneAssociationReflection Model.many_to_one :association1>
 
 You can get an array of all association reflections via Model.all_association_reflections:
 
-  Model.all_association_reflections # [{:name=>:association1, :type=>:many_to_one, :model=>Model, ...}, ...]
+  Model.all_association_reflections # [#<Sequel::Model::Associations::ManyToOneAssociationReflection Model.many_to_one :association1>, ...]
 
 Finally, you can get a hash of association reflections via Model.association_reflections:
 
-  Model.association_reflections # {:association1=>{:name=>:association1, :type=>:many_to_one, :model=>Model, ...}, ...}
+  Model.association_reflections # {:association1=>#<Sequel::Model::Associations::ManyToOneAssociationReflection Model.many_to_one :association1>, ...}
 
 == Validations Defined
 
@@ -118,4 +119,3 @@ When using the validation_class_methods plugin, you can use the validation_refle
 Similarly, when using the constraint_validations plugin, you can use the constraint_validation_reflections class method:
 
   Model.constraint_validation_reflections[:column] # => [[:presence, {}], [:max_length, {:argument=>255, :message=>'is just too long'}]]
-

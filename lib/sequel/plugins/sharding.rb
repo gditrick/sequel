@@ -1,14 +1,15 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
     # The sharding plugin augments Sequel's default model sharding support
     # in the following ways:
     #
-    # 1) It automatically sets model instances to be saved back to the
-    #    shard they were retreived from.
-    # 2) It makes model associations use the same shard as the model
-    #    object.
-    # 3) It adds a slightly nicer API for creating model instances on
-    #    specific shards.
+    # * It automatically saves model instances back to the
+    #   shard they were retreived from.
+    # * It makes model associations use the same shard as the model object.
+    # * It adds a slightly nicer API for creating model instances on
+    #   specific shards.
     # 
     # Usage:
     #
@@ -20,25 +21,31 @@ module Sequel
     module Sharding
       module ClassMethods
         # Create a new object on the given shard s.
-        def create_using_server(s, values={}, &block)
+        def create_using_server(s, values=OPTS, &block)
           new_using_server(s, values, &block).save
         end
 
-        # When eagerly loading, if the current dataset has a defined shard and the
-        # dataset that you will be using to get the associated records does not,
-        # use the current dataset's shard for the associated dataset.
-        def eager_loading_dataset(opts, ds, select, associations, eager_options=OPTS)
-          ds = super(opts, ds, select, associations, eager_options)
-          if !ds.opts[:server] and s = eager_options[:self] and server = s.opts[:server]
-            ds = ds.server(server)
+        # Eager load the association with the given eager loader options.
+        def eager_load_results(opts, eo, &block)
+          if (s = eo[:self]) && (server = s.opts[:server])
+            eb = eo[:eager_block]
+            set_server = proc do |ds|
+              ds = eb.call(ds) if eb
+              ds = ds.server?(server)
+              ds
+            end
+            eo = Hash[eo]
+            eo[:eager_block] = set_server
+            eo
           end
-          ds
+
+          super
         end
 
         # Return a newly instantiated object that is tied to the given
         # shard s.  When the object is saved, a record will be inserted
         # on shard s.
-        def new_using_server(s, values={}, &block)
+        def new_using_server(s, values=OPTS, &block)
           new(values, &block).set_server(s)
         end
 
@@ -49,7 +56,7 @@ module Sequel
         def eager_graph_dataset(opts, eager_options)
           ds = super
           if s = eager_options[:self].opts[:server]
-            ds = ds.server(s) unless ds.opts[:server]
+            ds = ds.server?(s)
           end
           ds
         end
@@ -68,6 +75,11 @@ module Sequel
         # Ensure that association datasets are tied to the correct shard.
         def _apply_association_options(*args)
           use_server(super)
+        end
+
+        # Don't use an associated object loader, as it won't respect the shard used.
+        def _associated_object_loader(opts, dynamic_opts)
+          nil
         end
 
         # Ensure that the join table for many_to_many associations uses the correct shard.
@@ -95,12 +107,18 @@ module Sequel
         # previous row_proc, but calls set_server on the output of that row_proc,
         # ensuring that objects retrieved by a specific shard know which shard they
         # are tied to.
-        def server(s)
-          ds = super
-          if rp = row_proc
-            ds.row_proc = proc{|r| rp.call(r).set_server(s)}
+        def row_proc
+          rp = super
+          if rp
+            case server = db.pool.send(:pick_server, opts[:server])
+            when nil, :default, :read_only
+              # nothing
+            else
+              old_rp = rp
+              rp = proc{|r| old_rp.call(r).set_server(server)}
+            end
           end
-          ds
+          rp 
         end
       end
     end

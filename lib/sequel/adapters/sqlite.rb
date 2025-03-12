@@ -1,80 +1,87 @@
+# frozen-string-literal: true
+
 require 'sqlite3'
-Sequel.require 'adapters/shared/sqlite'
+require_relative 'shared/sqlite'
 
 module Sequel
-  # Top level module for holding all SQLite-related modules and classes
-  # for Sequel.
   module SQLite
-    TYPE_TRANSLATOR = tt = Class.new do
-      FALSE_VALUES = (%w'0 false f no n' + [0]).freeze
+    FALSE_VALUES = (%w'0 false f no n'.each(&:freeze) + [0]).freeze
 
-      def blob(s)
-        Sequel::SQL::Blob.new(s.to_s)
+    blob = Object.new
+    def blob.call(s)
+      Sequel::SQL::Blob.new(s.to_s)
+    end
+
+    boolean = Object.new
+    def boolean.call(s)
+      s = s.downcase if s.is_a?(String)
+      !FALSE_VALUES.include?(s)
+    end
+
+    date = Object.new
+    def date.call(s)
+      case s
+      when String
+        Sequel.string_to_date(s)
+      when Integer
+        Date.jd(s)
+      when Float
+        Date.jd(s.to_i)
+      else
+        raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
       end
+    end
 
-      def boolean(s)
-        s = s.downcase if s.is_a?(String)
-        !FALSE_VALUES.include?(s)
+    integer = Object.new
+    def integer.call(s)
+      s.to_i
+    end
+
+    float = Object.new
+    def float.call(s)
+      s.to_f
+    end
+
+    numeric = Object.new
+    def numeric.call(s)
+      s = s.to_s unless s.is_a?(String)
+      BigDecimal(s) rescue s
+    end
+
+    time = Object.new
+    def time.call(s)
+      case s
+      when String
+        Sequel.string_to_time(s)
+      when Integer
+        Sequel::SQLTime.create(s/3600, (s % 3600)/60, s % 60)
+      when Float
+        s, f = s.divmod(1)
+        Sequel::SQLTime.create(s/3600, (s % 3600)/60, s % 60, (f*1000000).round)
+      else
+        raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
       end
-
-      def date(s)
-        case s
-        when String
-          Sequel.string_to_date(s)
-        when Integer
-          Date.jd(s)
-        when Float
-          Date.jd(s.to_i)
-        else
-          raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
-        end
-      end
-
-      def integer(s)
-        s.to_i
-      end
-
-      def float(s)
-        s.to_f
-      end
-
-      def numeric(s)
-        s = s.to_s unless s.is_a?(String)
-        ::BigDecimal.new(s) rescue s
-      end
-
-      def time(s)
-        case s
-        when String
-          Sequel.string_to_time(s)
-        when Integer
-          Sequel::SQLTime.create(s/3600, (s % 3600)/60, s % 60)
-        when Float
-          s, f = s.divmod(1)
-          Sequel::SQLTime.create(s/3600, (s % 3600)/60, s % 60, (f*1000000).round)
-        else
-          raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
-        end
-      end
-
-    end.new
+    end
 
     # Hash with string keys and callable values for converting SQLite types.
     SQLITE_TYPES = {}
     {
-      %w'date' => tt.method(:date),
-      %w'time' => tt.method(:time),
-      %w'bit bool boolean' => tt.method(:boolean),
-      %w'integer smallint mediumint int bigint' => tt.method(:integer),
-      %w'numeric decimal money' => tt.method(:numeric),
-      %w'float double real dec fixed' + ['double precision'] => tt.method(:float),
-      %w'blob' => tt.method(:blob)
+      %w'date' => date,
+      %w'time' => time,
+      %w'bit bool boolean' => boolean,
+      %w'integer smallint mediumint int bigint' => integer,
+      %w'numeric decimal money' => numeric,
+      %w'float double real dec fixed' + ['double precision'] => float,
+      %w'blob' => blob
     }.each do |k,v|
       k.each{|n| SQLITE_TYPES[n] = v}
     end
+    SQLITE_TYPES.freeze
+
+    sqlite_version = SQLite3::VERSION.split('.').map(&:to_i)[0..1]
+    sqlite_version = sqlite_version[0] * 100 + sqlite_version[1]
+    USE_EXTENDED_RESULT_CODES = sqlite_version >= 104
     
-    # Database class for SQLite databases used with Sequel and the
-    # ruby-sqlite3 driver.
     class Database < Sequel::Database
       include ::Sequel::SQLite::DatabaseMethods
       
@@ -91,17 +98,52 @@ module Sequel
       # The conversion procs to use for this database
       attr_reader :conversion_procs
 
-      # Connect to the database.  Since SQLite is a file based database,
-      # the only options available are :database (to specify the database
-      # name), and :timeout, to specify how long to wait for the database to
-      # be available if it is locked, given in milliseconds (default is 5000).
+      def initialize(opts = OPTS)
+        super
+        @allow_regexp = typecast_value_boolean(opts[:setup_regexp_function])
+      end
+
+      # Connect to the database. Since SQLite is a file based database,
+      # available options are limited:
+      #
+      # :database :: database name (filename or ':memory:' or file: URI)
+      # :readonly :: open database in read-only mode; useful for reading
+      #              static data that you do not want to modify
+      # :disable_dqs :: disable double quoted strings in DDL and DML statements
+      #                 (requires SQLite 3.29.0+ and sqlite3 gem version 1.4.3+).
+      # :timeout :: how long to wait for the database to be available if it
+      #             is locked, given in milliseconds (default is 5000)
+      # :setup_regexp_function :: enable use of Regexp objects with SQL
+      #             'REGEXP' operator. If the value is :cached or "cached",
+      #             caches the generated regexps, which can result in a memory
+      #             leak if dynamic regexps are used.  If the value is a Proc,
+      #             it will be called with a string for the regexp and a string
+      #             for the value to compare, and should return whether the regexp
+      #             matches.
+      # :regexp_function_cache :: If setting +setup_regexp_function+ to +cached+, this
+      #             determines the cache to use.  It should either be a proc or a class, and it
+      #             defaults to +Hash+. You can use +ObjectSpace::WeakKeyMap+ on Ruby 3.3+ to
+      #             have the VM automatically remove regexps from the cache after they
+      #             are no longer used.
       def connect(server)
         opts = server_opts(server)
         opts[:database] = ':memory:' if blank_object?(opts[:database])
-        db = ::SQLite3::Database.new(opts[:database])
-        db.busy_timeout(opts.fetch(:timeout, 5000))
+        sqlite3_opts = {}
+        sqlite3_opts[:readonly] = typecast_value_boolean(opts[:readonly]) if opts.has_key?(:readonly)
+        # SEQUEL6: Make strict: true the default behavior
+        sqlite3_opts[:strict] = typecast_value_boolean(opts[:disable_dqs]) if opts.has_key?(:disable_dqs)
+        db = ::SQLite3::Database.new(opts[:database].to_s, sqlite3_opts)
+        db.busy_timeout(typecast_value_integer(opts.fetch(:timeout, 5000)))
+
+        if USE_EXTENDED_RESULT_CODES
+          db.extended_result_codes = true
+        end
         
-        connection_pragmas.each{|s| log_yield(s){db.execute_batch(s)}}
+        connection_pragmas.each{|s| log_connection_yield(s, db){db.execute_batch(s)}}
+
+        if typecast_value_boolean(opts[:setup_regexp_function])
+          setup_regexp_function(db, opts[:setup_regexp_function])
+        end
         
         class << db
           attr_reader :prepared_statements
@@ -109,6 +151,12 @@ module Sequel
         db.instance_variable_set(:@prepared_statements, {})
         
         db
+      end
+
+      # Whether this Database instance is setup to allow regexp matching.
+      # True if the :setup_regexp_function option was passed when creating the Database.
+      def allow_regexp?
+        @allow_regexp
       end
 
       # Disconnect given connections from the database.
@@ -138,11 +186,15 @@ module Sequel
         end
       end
       
-      # Run the given SQL with the given arguments and return the last inserted row id.
       def execute_insert(sql, opts=OPTS)
         _execute(:insert, sql, opts)
       end
       
+      def freeze
+        @conversion_procs.freeze
+        super
+      end
+
       # Handle Integer and Float arguments, since SQLite can store timestamps as integers and floats.
       def to_application_timestamp(s)
         case s
@@ -164,30 +216,57 @@ module Sequel
         @conversion_procs['datetime'] = @conversion_procs['timestamp'] = method(:to_application_timestamp)
         set_integer_booleans
       end
+
+      def setup_regexp_function(db, how)
+        case how
+        when Proc
+          # nothing
+        when :cached, "cached"
+          cache = @opts[:regexp_function_cache] || Hash
+          cache = cache.is_a?(Proc) ? cache.call : cache.new
+          how = if RUBY_VERSION >= '2.4'
+            lambda do |regexp_str, str|
+              (cache[regexp_str] ||= Regexp.new(regexp_str)).match?(str)
+            end
+          else
+            lambda do |regexp_str, str|
+              (cache[regexp_str] ||= Regexp.new(regexp_str)).match(str)
+            end
+          end
+        else
+          how = if RUBY_VERSION >= '2.4'
+            lambda{|regexp_str, str| Regexp.new(regexp_str).match?(str)}
+          else
+            lambda{|regexp_str, str| Regexp.new(regexp_str).match(str)}
+          end
+        end
+
+        db.create_function("regexp", 2) do |func, regexp_str, str|
+          func.result = how.call(regexp_str, str) ? 1 : 0
+        end
+      end
       
       # Yield an available connection.  Rescue
       # any SQLite3::Exceptions and turn them into DatabaseErrors.
       def _execute(type, sql, opts, &block)
-        begin
-          synchronize(opts[:server]) do |conn|
-            return execute_prepared_statement(conn, type, sql, opts, &block) if sql.is_a?(Symbol)
-            log_args = opts[:arguments]
-            args = {}
-            opts.fetch(:arguments, {}).each{|k, v| args[k] = prepared_statement_argument(v)}
-            case type
-            when :select
-              log_yield(sql, log_args){conn.query(sql, args, &block)}
-            when :insert
-              log_yield(sql, log_args){conn.execute(sql, args)}
-              conn.last_insert_row_id
-            when :update
-              log_yield(sql, log_args){conn.execute_batch(sql, args)}
-              conn.changes
-            end
+        synchronize(opts[:server]) do |conn|
+          return execute_prepared_statement(conn, type, sql, opts, &block) if sql.is_a?(Symbol)
+          log_args = opts[:arguments]
+          args = {}
+          opts.fetch(:arguments, OPTS).each{|k, v| args[k] = prepared_statement_argument(v)}
+          case type
+          when :select
+            log_connection_yield(sql, conn, log_args){conn.query(sql, args, &block)}
+          when :insert
+            log_connection_yield(sql, conn, log_args){conn.execute(sql, args)}
+            conn.last_insert_row_id
+          when :update
+            log_connection_yield(sql, conn, log_args){conn.execute_batch(sql, args)}
+            conn.changes
           end
-        rescue SQLite3::Exception => e
-          raise_error(e)
         end
+      rescue SQLite3::Exception => e
+        raise_error(e)
       end
       
       # The SQLite adapter does not need the pool to convert exceptions.
@@ -233,19 +312,20 @@ module Sequel
           end
         end
         unless cps
-          cps = log_yield("PREPARE #{name}: #{sql}"){conn.prepare(sql)}
+          cps = log_connection_yield("PREPARE #{name}: #{sql}", conn){conn.prepare(sql)}
           conn.prepared_statements[name] = [cps, sql]
         end
-        log_sql = "EXECUTE #{name}"
+        log_sql = String.new
+        log_sql << "EXECUTE #{name}"
         if ps.log_sql
           log_sql << " ("
           log_sql << sql
           log_sql << ")"
         end
         if block
-          log_yield(log_sql, args){cps.execute(ps_args, &block)}
+          log_connection_yield(log_sql, conn, args){cps.execute(ps_args, &block)}
         else
-          log_yield(log_sql, args){cps.execute!(ps_args){|r|}}
+          log_connection_yield(log_sql, conn, args){cps.execute!(ps_args){|r|}}
           case type
           when :insert
             conn.last_insert_row_id
@@ -260,17 +340,22 @@ module Sequel
       def database_error_classes
         [SQLite3::Exception, ArgumentError]
       end
+
+      def dataset_class_default
+        Dataset
+      end
+
+      if USE_EXTENDED_RESULT_CODES
+        # Support SQLite exception codes if ruby-sqlite3 supports them.
+        def sqlite_error_code(exception)
+          exception.code if exception.respond_to?(:code)
+        end
+      end
     end
     
-    # Dataset class for SQLite datasets that use the ruby-sqlite3 driver.
     class Dataset < Sequel::Dataset
       include ::Sequel::SQLite::DatasetMethods
 
-      Database::DatasetClass = self
-      
-      PREPARED_ARG_PLACEHOLDER = ':'.freeze
-      
-      # SQLite already supports named bind arguments, so use directly.
       module ArgumentMapper
         include Sequel::Dataset::ArgumentMapper
         
@@ -291,78 +376,47 @@ module Sequel
         def prepared_arg(k)
           LiteralString.new("#{prepared_arg_placeholder}#{k.to_s.gsub('.', '__')}")
         end
-
-        # Always assume a prepared argument.
-        def prepared_arg?(k)
-          true
-        end
       end
       
-      # SQLite prepared statement uses a new prepared statement each time
-      # it is called, but it does use the bind arguments.
-      module BindArgumentMethods
-        include ArgumentMapper
-        
-        private
-        
-        # Run execute_select on the database with the given SQL and the stored
-        # bind arguments.
-        def execute(sql, opts=OPTS, &block)
-          super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts=OPTS, &block)
-          super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
-        end
-        
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts=OPTS, &block)
-          super(sql, {:arguments=>bind_arguments}.merge(opts), &block)
+      BindArgumentMethods = prepared_statements_module(:bind, ArgumentMapper)
+      PreparedStatementMethods = prepared_statements_module(:prepare, BindArgumentMethods)
+
+      # Support regexp functions if using :setup_regexp_function Database option.
+      def complex_expression_sql_append(sql, op, args)
+        case op
+        when :~, :'!~', :'~*', :'!~*'
+          return super unless supports_regexp?
+
+          case_insensitive = [:'~*', :'!~*'].include?(op)
+          sql << 'NOT ' if [:'!~', :'!~*'].include?(op)
+          sql << '('
+          sql << 'LOWER(' if case_insensitive
+          literal_append(sql, args[0])
+          sql << ')' if case_insensitive
+          sql << ' REGEXP '
+          sql << 'LOWER(' if case_insensitive
+          literal_append(sql, args[1])
+          sql << ')' if case_insensitive
+          sql << ')'
+        else
+          super
         end
       end
 
-      module PreparedStatementMethods
-        include BindArgumentMethods
-          
-        private
-          
-        # Execute the stored prepared statement name and the stored bind
-        # arguments instead of the SQL given.
-        def execute(sql, opts=OPTS, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-         
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_dui(sql, opts=OPTS, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-          
-        # Same as execute, explicit due to intricacies of alias and super.
-        def execute_insert(sql, opts=OPTS, &block)
-          super(prepared_statement_name, opts, &block)
-        end
-      end
-        
-      # Execute the given type of statement with the hash of values.
-      def call(type, bind_vars={}, *values, &block)
-        ps = to_prepared_statement(type, values)
-        ps.extend(BindArgumentMethods)
-        ps.call(bind_vars, &block)
-      end
-      
-      # Yield a hash for each row in the dataset.
       def fetch_rows(sql)
         execute(sql) do |result|
-          i = -1
           cps = db.conversion_procs
           type_procs = result.types.map{|t| cps[base_type_name(t)]}
-          cols = result.columns.map{|c| i+=1; [output_identifier(c), i, type_procs[i]]}
-          @columns = cols.map{|c| c.first}
+          j = -1
+          cols = result.columns.map{|c| [output_identifier(c), type_procs[(j+=1)]]}
+          self.columns = cols.map(&:first)
+          max = cols.length
           result.each do |values|
             row = {}
-            cols.each do |name,id,type_proc|
-              v = values[id]
+            i = -1
+            while (i += 1) < max
+              name, type_proc = cols[i]
+              v = values[i]
               if type_proc && v
                 v = type_proc.call(v)
               end
@@ -372,18 +426,10 @@ module Sequel
           end
         end
       end
-      
-      # Prepare the given type of query with the given name and store
-      # it in the database.  Note that a new native prepared statement is
-      # created on each call to this prepared statement.
-      def prepare(type, name=nil, *values)
-        ps = to_prepared_statement(type, values)
-        ps.extend(PreparedStatementMethods)
-        if name
-          ps.prepared_statement_name = name
-          db.set_prepared_statement(name, ps)
-        end
-        ps
+
+      # Support regexp if using :setup_regexp_function Database option.
+      def supports_regexp?
+        db.allow_regexp?
       end
       
       private
@@ -398,9 +444,17 @@ module Sequel
         sql << "'" << ::SQLite3::Database.quote(v) << "'"
       end
 
+      def bound_variable_modules
+        [BindArgumentMethods]
+      end
+
+      def prepared_statement_modules
+        [PreparedStatementMethods]
+      end
+
       # SQLite uses a : before the name of the argument as a placeholder.
       def prepared_arg_placeholder
-        PREPARED_ARG_PLACEHOLDER
+        ':'
       end
     end
   end

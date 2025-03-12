@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
     # The dirty plugin makes Sequel save the initial value of
@@ -35,10 +37,24 @@ module Sequel
     #
     # It also saves the previously changed values after an update:
     #
-    #   artist.update(:name=>'Bar')
+    #   artist.update(name: 'Bar')
     #   artist.column_changes        # => {}
     #   artist.previous_changes      # => {:name=>['Foo', 'Bar']}
-    # 
+    #
+    #   artist.column_previously_was(:name)
+    #   # => 'Foo'
+    #   artist.column_previously_changed?(:name)
+    #   # => true
+    #   artist.column_previously_changed?(:name, from: 'Foo', to: 'Bar')
+    #   # => true
+    #   artist.column_previously_changed?(:name, from: 'Foo', to: 'Baz')
+    #   # => false
+    #
+    # There is one caveat; when used with a column that also uses the
+    # serialization plugin, setting the column back to its original value
+    # after changing it is not correctly detected and will leave an entry
+    # in changed_columns.
+    #
     # Usage:
     #
     #   # Make all model subclass instances record previous values (called before loading subclasses)
@@ -54,13 +70,26 @@ module Sequel
         # that were used in the update statement.
         attr_reader :previous_changes
 
+        # Reset the initial values after saving.
+        def after_save
+          super
+          reset_initial_values
+        end
+
+        # Save the current changes so they are available after updating.  This happens
+        # before after_save resets them.
+        def after_update
+          super
+          @previous_changes = column_changes
+        end
+
         # An array with the initial value and the current value
         # of the column, if the column has been changed.  If the
         # column has not been changed, returns nil.
         #
         #   column_change(:name) # => ['Initial', 'Current']
         def column_change(column)
-          [initial_value(column), send(column)] if column_changed?(column)
+          [initial_value(column), get_column_value(column)] if column_changed?(column)
         end
 
         # A hash with column symbol keys and pairs of initial and
@@ -70,7 +99,7 @@ module Sequel
         def column_changes
           h = {}
           initial_values.each do |column, value|
-            h[column] = [value, send(column)]
+            h[column] = [value, get_column_value(column)]
           end
           h
         end
@@ -85,15 +114,39 @@ module Sequel
           initial_values.has_key?(column)
         end
 
-        # Duplicate internal data structures
-        def dup 
-          s = self
-          super.instance_eval do
-            @initial_values = s.initial_values.dup
-            @missing_initial_values = s.send(:missing_initial_values).dup
-            @previous_changes = s.previous_changes.dup if s.previous_changes
-            self
+        # Whether the column was previously changed.
+        # Options:
+        # :from :: If given, the previous initial value of the column must match this
+        # :to :: If given, the previous changed value of the column must match this
+        #
+        #   update(name: 'Current')
+        #   previous_changes                  # => {:name=>['Initial', 'Current']}
+        #   column_previously_changed?(:name) # => true
+        #   column_previously_changed?(:id)   # => false
+        #   column_previously_changed?(:name, from: 'Initial', to: 'Current') # => true
+        #   column_previously_changed?(:name, from: 'Foo', to: 'Current')     # => false
+        def column_previously_changed?(column, opts=OPTS)
+          return false unless (pc = @previous_changes) && (val = pc[column])
+
+          if opts.has_key?(:from)
+            return false unless val[0] == opts[:from]
           end
+
+          if opts.has_key?(:to)
+            return false unless val[1] == opts[:to]
+          end
+
+          true
+        end
+
+        # The previous value of the column, which is the initial value of
+        # the column before the object was previously saved.
+        #
+        #   initial_value(:name) # => 'Initial'
+        #   update(name: 'Current')
+        #   column_previously_was(:name) # => 'Initial'
+        def column_previously_was(column)
+          (pc = @previous_changes) && (val = pc[column]) && val[0]
         end
 
         # Freeze internal data structures
@@ -110,7 +163,7 @@ module Sequel
         #
         #   initial_value(:name) # => 'Initial'
         def initial_value(column)
-          initial_values.fetch(column){send(column)}
+          initial_values.fetch(column){get_column_value(column)}
         end
 
         # A hash with column symbol keys and initial values.
@@ -127,7 +180,7 @@ module Sequel
         #   name # => 'Initial'
         def reset_column(column)
           if initial_values.has_key?(column)
-            send(:"#{column}=", initial_values[column])
+            set_column_value(:"#{column}=", initial_values[column])
           end
           if missing_initial_values.include?(column)
             values.delete(column)
@@ -141,13 +194,13 @@ module Sequel
         #   name.gsub(/i/i, 'o')
         #   column_change(:name) # => ['Initial', 'onotoal']
         def will_change_column(column)
-          changed_columns << column unless changed_columns.include?(column)
+          _add_changed_column(column)
           check_missing_initial_value(column)
 
           value = if initial_values.has_key?(column)
             initial_values[column]
           else
-            send(column)
+            get_column_value(column)
           end
 
           initial_values[column] = if value && value != true && value.respond_to?(:clone)
@@ -163,23 +216,10 @@ module Sequel
 
         private
 
-        # Reset the initial values when setting values.
-        def _refresh_set_values(hash)
-          reset_initial_values
+        # Reset initial values when clearing changed columns
+        def _clear_changed_columns(reason)
+          reset_initial_values if reason == :initialize || reason == :refresh
           super
-        end
-
-        # Reset the initial values after saving.
-        def after_save
-          super
-          reset_initial_values
-        end
-
-        # Save the current changes so they are available after updating.  This happens
-        # before after_save resets them.
-        def after_update
-          super
-          @previous_changes = column_changes
         end
 
         # When changing the column value, save the initial column value.  If the column
@@ -190,12 +230,12 @@ module Sequel
             initial = iv[column]
             super
             if value == initial
-              changed_columns.delete(column) unless missing_initial_values.include?(column)
+              _changed_columns.delete(column) unless missing_initial_values.include?(column)
               iv.delete(column)
             end
           else
             check_missing_initial_value(column)
-            iv[column] = send(column)
+            iv[column] = get_column_value(column)
             super
           end
         end
@@ -209,10 +249,13 @@ module Sequel
           end
         end
 
-        # Reset the initial values when initializing.
-        def initialize_set(h)
+        # Duplicate internal data structures
+        def initialize_copy(other)
           super
-          reset_initial_values
+          @initial_values = Hash[other.initial_values]
+          @missing_initial_values = other.send(:missing_initial_values).dup
+          @previous_changes = Hash[other.previous_changes] if other.previous_changes
+          self
         end
 
         # Array holding column symbols that were not present initially.  This is necessary

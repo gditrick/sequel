@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   class Database
     # ---------------------
@@ -5,10 +7,8 @@ module Sequel
     # This methods generally execute SQL code on the database server.
     # ---------------------
 
-    STRING_DEFAULT_RE = /\A'(.*)'\z/
-    CURRENT_TIMESTAMP_RE = /now|CURRENT|getdate|\ADate\(\)\z/io
-    COLUMN_SCHEMA_DATETIME_TYPES = [:date, :datetime]
-    COLUMN_SCHEMA_STRING_TYPES = [:string, :blob, :date, :datetime, :time, :enum, :set, :interval]
+    COLUMN_SCHEMA_DATETIME_TYPES = [:date, :datetime].freeze
+    COLUMN_SCHEMA_STRING_TYPES = [:string, :blob, :date, :datetime, :time, :enum, :set, :interval].freeze
 
     # The prepared statement object hash for this database, keyed by name symbol
     attr_reader :prepared_statements
@@ -30,9 +30,9 @@ module Sequel
     # Call the prepared statement with the given name with the given hash
     # of arguments.
     #
-    #   DB[:items].filter(:id=>1).prepare(:first, :sa)
+    #   DB[:items].where(id: 1).prepare(:first, :sa)
     #   DB.call(:sa) # SELECT * FROM items WHERE id = 1
-    def call(ps_name, hash={}, &block)
+    def call(ps_name, hash=OPTS, &block)
       prepared_statement(ps_name).call(hash, &block)
     end
     
@@ -43,7 +43,7 @@ module Sequel
       execute_dui(sql, opts, &block)
     end
 
-    # Method that should be used when issuing a DELETE, UPDATE, or INSERT
+    # Method that should be used when issuing a DELETE or UPDATE
     # statement.  By default, calls execute.
     # This method should not be called directly by user code.
     def execute_dui(sql, opts=OPTS, &block)
@@ -57,11 +57,11 @@ module Sequel
       execute_dui(sql, opts, &block)
     end
 
-    # Returns a single value from the database, e.g.:
+    # Returns a single value from the database, see Dataset#get.
     #
     #   DB.get(1) # SELECT 1
     #   # => 1
-    #   DB.get{server_version{}} # SELECT server_version()
+    #   DB.get{server_version.function} # SELECT server_version()
     def get(*args, &block)
       @default_dataset.get(*args, &block)
     end
@@ -86,12 +86,13 @@ module Sequel
     # :schema :: An explicit schema to use.  It may also be implicitly provided
     #            via the table name.
     #
-    # If schema parsing is supported by the database, the column information should hash at least contain the
+    # If schema parsing is supported by the database, the column information hash should contain at least the
     # following entries:
     #
     # :allow_null :: Whether NULL is an allowed value for the column.
     # :db_type :: The database type for the column, as a database specific string.
-    # :default :: The database default for the column, as a database specific string.
+    # :default :: The database default for the column, as a database specific string, or nil if there is
+    #             no default value.
     # :primary_key :: Whether the columns is a primary key column.  If this column is not present,
     #                 it means that primary key information is unavailable, not that the column
     #                 is not a primary key.
@@ -156,8 +157,36 @@ module Sequel
       end
 
       cols = schema_parse_table(table_name, opts)
-      raise(Error, 'schema parsing returned no columns, table probably doesn\'t exist') if cols.nil? || cols.empty?
-      cols.each{|_,c| c[:ruby_default] = column_schema_to_ruby_default(c[:default], c[:type])}
+      raise(Error, "schema parsing returned no columns, table #{table_name.inspect} probably doesn't exist") if cols.nil? || cols.empty?
+
+      primary_keys = 0
+      auto_increment_set = false
+      cols.each do |_,c|
+        auto_increment_set = true if c.has_key?(:auto_increment)
+        primary_keys += 1 if c[:primary_key]
+      end
+
+      cols.each do |_,c|
+        c[:ruby_default] = column_schema_to_ruby_default(c[:default], c[:type]) unless c.has_key?(:ruby_default)
+        if c[:primary_key] && !auto_increment_set
+          # If adapter didn't set it, assume that integer primary keys are auto incrementing
+          c[:auto_increment] = primary_keys == 1 && !!(c[:db_type] =~ /int/io)
+        end
+        if !c[:max_length] && c[:type] == :string && (max_length = column_schema_max_length(c[:db_type]))
+          c[:max_length] = max_length
+        end
+        if !c[:max_value] && !c[:min_value]
+          min_max = case c[:type]
+          when :integer
+            column_schema_integer_min_max_values(c)
+          when :decimal
+            column_schema_decimal_min_max_values(c)
+          end
+          c[:min_value], c[:max_value] = min_max if min_max
+        end
+      end
+      schema_post_process(cols)
+
       Sequel.synchronize{@schemas[quoted_name] = cols} if cache_schema
       cols
     end
@@ -173,7 +202,8 @@ module Sequel
     def table_exists?(name)
       sch, table_name = schema_and_table(name)
       name = SQL::QualifiedIdentifier.new(sch, table_name) if sch
-      _table_exists?(from(name))
+      ds = from(name)
+      transaction(:savepoint=>:only){_table_exists?(ds)}
       true
     rescue DatabaseError
       false
@@ -215,11 +245,11 @@ module Sequel
       when :date
         Sequel.string_to_date(default)
       when :datetime
-        DateTime.parse(default)
+        Sequel.string_to_datetime(default)
       when :time
         Sequel.string_to_time(default)
       when :decimal
-        BigDecimal.new(default)
+        BigDecimal(default)
       end
     end
    
@@ -227,7 +257,7 @@ module Sequel
     # and return the normalized value.
     def column_schema_normalize_default(default, type)
       if column_schema_default_string_type?(type)
-        return unless m = STRING_DEFAULT_RE.match(default)
+        return unless m = /\A'(.*)'\z/.match(default)
         m[1].gsub("''", "'")
       else
         default
@@ -239,7 +269,7 @@ module Sequel
     def column_schema_to_ruby_default(default, type)
       return default unless default.is_a?(String)
       if COLUMN_SCHEMA_DATETIME_TYPES.include?(type)
-        if CURRENT_TIMESTAMP_RE.match(default)
+        if /now|today|CURRENT|getdate|\ADate\(\)\z/i.match(default)
           if type == :date
             return Sequel::CURRENT_DATE
           else
@@ -251,6 +281,76 @@ module Sequel
       column_schema_default_to_ruby_value(default, type) rescue nil
     end
 
+    INTEGER1_MIN_MAX = [-128, 127].freeze
+    INTEGER2_MIN_MAX = [-32768, 32767].freeze
+    INTEGER3_MIN_MAX = [-8388608, 8388607].freeze
+    INTEGER4_MIN_MAX = [-2147483648, 2147483647].freeze
+    INTEGER8_MIN_MAX = [-9223372036854775808, 9223372036854775807].freeze
+    UNSIGNED_INTEGER1_MIN_MAX = [0, 255].freeze
+    UNSIGNED_INTEGER2_MIN_MAX = [0, 65535].freeze
+    UNSIGNED_INTEGER3_MIN_MAX = [0, 16777215].freeze
+    UNSIGNED_INTEGER4_MIN_MAX = [0, 4294967295].freeze
+    UNSIGNED_INTEGER8_MIN_MAX = [0, 18446744073709551615].freeze
+
+    # Look at the db_type and guess the minimum and maximum integer values for
+    # the column.
+    def column_schema_integer_min_max_values(column)
+      db_type = column[:db_type]
+      if /decimal|numeric|number/i =~ db_type
+        if min_max = column_schema_decimal_min_max_values(column)
+          min_max.map!(&:to_i)
+        end
+        return min_max
+      end
+
+      unsigned = /unsigned/i =~ db_type
+      case db_type
+      when /big|int8/i
+        unsigned ? UNSIGNED_INTEGER8_MIN_MAX : INTEGER8_MIN_MAX
+      when /medium/i
+        unsigned ? UNSIGNED_INTEGER3_MIN_MAX : INTEGER3_MIN_MAX
+      when /small|int2/i
+        unsigned ? UNSIGNED_INTEGER2_MIN_MAX : INTEGER2_MIN_MAX
+      when /tiny/i
+        (unsigned || column_schema_tinyint_type_is_unsigned?) ? UNSIGNED_INTEGER1_MIN_MAX : INTEGER1_MIN_MAX
+      else
+        unsigned ? UNSIGNED_INTEGER4_MIN_MAX : INTEGER4_MIN_MAX
+      end
+    end
+
+    # Look at the db_type and guess the minimum and maximum decimal values for
+    # the column.
+    def column_schema_decimal_min_max_values(column)
+      if column[:column_size] && column[:scale]
+        precision = column[:column_size]
+        scale = column[:scale]
+      elsif /\((\d+)(?:,\s*(-?\d+))?\)/ =~ column[:db_type]
+        precision = $1.to_i
+        scale = $2.to_i if $2
+      end
+
+      if precision
+        limit = BigDecimal("9" * precision)
+        if scale
+          limit /= 10**(scale)
+        end
+        [-limit, limit]
+      end
+    end
+
+    # Whether the tinyint type (if supported by the database) is unsigned by default.
+    def column_schema_tinyint_type_is_unsigned?
+      false
+    end
+
+    # Look at the db_type and guess the maximum length of the column.
+    # This assumes types such as varchar(255).
+    def column_schema_max_length(db_type)
+      if db_type =~ /\((\d+)\)/
+        $1.to_i
+      end
+    end
+
     # Return a Method object for the dataset's output_identifier_method.
     # Used in metadata parsing to make sure the returned information is in the
     # correct format.
@@ -258,16 +358,16 @@ module Sequel
       (ds || dataset).method(:input_identifier)
     end
     
+    # Uncached version of metadata_dataset, designed for overriding.
+    def _metadata_dataset
+      dataset
+    end
+
     # Return a dataset that uses the default identifier input and output methods
     # for this database.  Used when parsing metadata so that column symbols are
     # returned as expected.
     def metadata_dataset
-      @metadata_dataset ||= (
-        ds = dataset;
-        ds.identifier_input_method = identifier_input_method_default;
-        ds.identifier_output_method = identifier_output_method_default;
-        ds
-      )
+      @metadata_dataset ||= _metadata_dataset
     end
 
     # Return a Method object for the dataset's output_identifier_method.
@@ -279,7 +379,10 @@ module Sequel
 
     # Remove the cached schema for the given schema name
     def remove_cached_schema(table)
-      Sequel.synchronize{@schemas.delete(quote_schema_table(table))} if @schemas
+      cache = @default_dataset.send(:cache)
+      Sequel.synchronize{cache.clear}
+      k = quote_schema_table(table)
+      Sequel.synchronize{@schemas.delete(k)}
     end
     
     # Match the database's column type to a ruby type via a
@@ -293,20 +396,40 @@ module Sequel
         :integer
       when /\Adate\z/io
         :date
-      when /\A((small)?datetime|timestamp( with(out)? time zone)?)(\(\d+\))?\z/io
+      when /\A((small)?datetime|timestamp(\(\d\))?( with(out)? time zone)?)\z/io
         :datetime
       when /\Atime( with(out)? time zone)?\z/io
         :time
       when /\A(bool(ean)?)\z/io
         :boolean
-      when /\A(real|float|double( precision)?|double\(\d+,\d+\)( unsigned)?)\z/io
+      when /\A(real|float( unsigned)?|double( precision)?|double\(\d+,\d+\)( unsigned)?)\z/io
         :float
-      when /\A(?:(?:(?:num(?:ber|eric)?|decimal)(?:\(\d+,\s*(\d+|false|true)\))?))\z/io
+      when /\A(?:(?:(?:num(?:ber|eric)?|decimal)(?:\(\d+,\s*(-?\d+|false|true)\))?))\z/io
         $1 && ['0', 'false'].include?($1) ? :integer : :decimal
       when /bytea|blob|image|(var)?binary/io
         :blob
       when /\Aenum/io
         :enum
+      end
+    end
+
+    # Post process the schema values.  
+    def schema_post_process(cols)
+      # :nocov:
+      if RUBY_VERSION >= '2.5'
+      # :nocov:
+        cols.each do |_, h|
+          db_type = h[:db_type]
+          if db_type.is_a?(String)
+            h[:db_type] = -db_type
+          end
+        end
+      end
+
+      cols.each do |_,c|
+        c.each_value do |val|
+          val.freeze if val.is_a?(String)
+        end
       end
     end
   end

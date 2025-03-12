@@ -1,9 +1,11 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
     # StringStripper is a plugin that strips all input strings
     # when assigning to the model's values. Example:
     #
-    #   album = Album.new(:name=>' A ')
+    #   album = Album.new(name: ' A ')
     #   album.name # => 'A'
     #
     # SQL::Blob instances and all non-strings are not modified by
@@ -12,7 +14,7 @@ module Sequel
     # other columns to skip the stripping:
     #
     #   Album.skip_string_stripping :foo
-    #   Album.new(:foo=>' A ').foo # => ' A '
+    #   Album.new(foo: ' A ').foo # => ' A '
     # 
     # Usage:
     #
@@ -26,7 +28,7 @@ module Sequel
         model.plugin(:input_transformer, :string_stripper){|v| (v.is_a?(String) && !v.is_a?(SQL::Blob)) ? v.strip : v}
       end
       def self.configure(model)
-        model.instance_eval{set_skipped_string_stripping_columns if @dataset}
+        model.send(:set_skipped_string_stripping_columns)
       end
 
       module ClassMethods

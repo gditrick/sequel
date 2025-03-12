@@ -1,6 +1,8 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
-    # The Tree plugin adds additional associations and methods that allow you to 
+    # The tree plugin adds additional associations and methods that allow you to 
     # treat a Model as a tree.  
     #
     # A column for holding the parent key is required and is :parent_id by default.  
@@ -19,7 +21,7 @@ module Sequel
     #   end
     #  
     #   class Node < Sequel::Model
-    #     plugin :tree, :key=>:parentid, :order=>:position
+    #     plugin :tree, key: :parentid, order: :position
     #   end
     module Tree
       # Create parent and children associations.  Any options
@@ -30,51 +32,56 @@ module Sequel
       def self.apply(model, opts=OPTS)
         opts = opts.dup
         opts[:class] = model
+        opts[:key] ||= :parent_id
 
-        model.instance_eval do
-          @parent_column = (opts[:key] ||= :parent_id)
-          @tree_order = opts[:order]
-        end
-        
-        par = opts.merge(opts.fetch(:parent, {}))
+        par = opts.merge(opts.fetch(:parent, OPTS))
         parent = par.fetch(:name, :parent)
         
-        chi = opts.merge(opts.fetch(:children, {}))
+        chi = opts.merge(opts.fetch(:children, OPTS))
         children = chi.fetch(:name, :children)
 
         par[:reciprocal] = children
-        chi[:recripocal] = parent
+        chi[:reciprocal] = parent
 
-        model.many_to_one parent, par
-        model.one_to_many children, chi
+        model.instance_exec do
+          @parent_column = opts[:key]
+          @qualified_parent_column = Sequel.deep_qualify(table_name, opts[:key])
+          @tree_order = opts[:order]
+          @parent_association_name = parent
+          @children_association_name = children
 
-        model.plugin SingleRoot if opts[:single_root]
+          many_to_one parent, par
+          one_to_many children, chi
+          plugin SingleRoot if opts[:single_root]
+        end
       end
       
       module ClassMethods
         # The column symbol or array of column symbols on which to order the tree.
         attr_accessor :tree_order
         
-        # The symbol for the column containing the value pointing to the
-        # parent of the leaf.
+        # The symbol or array of symbols for the column containing the value pointing to the
+        # parent of the node.
         attr_accessor :parent_column
 
-        Plugins.inherited_instance_variables(self, :@parent_column=>nil, :@tree_order=>nil)
+        # The qualified identifier or array of qualified identifiers for the column
+        # containing the value pointing to the parent of the node.
+        attr_accessor :qualified_parent_column
 
-        # Returns list of all root nodes (those with no parent nodes).
-        #
-        #   TreeClass.roots # => [root1, root2]
-        def roots
-          roots_dataset.all
-        end
+        # The association name for the parent association
+        attr_reader :parent_association_name
+
+        # The association name for the children association
+        attr_reader :children_association_name
+
+        Plugins.inherited_instance_variables(self, :@parent_column=>nil, :@qualified_parent_column=>nil, :@tree_order=>nil, :@parent_association_name=>nil, :@children_association_name=>nil)
+        Plugins.def_dataset_methods(self, [:roots, :roots_dataset])
+
+        # Should freeze tree order if it is an array when freezing the model class.
+        def freeze
+          @tree_order.freeze if @tree_order.is_a?(Array)
         
-        # Returns the dataset for retrieval of all root nodes
-        #
-        #   TreeClass.roots_dataset => Sequel#Dataset
-        def roots_dataset
-          ds = where(Sequel.or(Array(parent_column).zip([])))
-          ds = ds.order(*tree_order) if tree_order
-          ds
+          super
         end
       end
       
@@ -84,16 +91,19 @@ module Sequel
         #   subchild1.ancestors # => [child1, root]
         def ancestors
           node, nodes = self, []
-          nodes << node = node.parent while node.parent
+          meth = model.parent_association_name
+          while par = node.send(meth)
+            nodes << node = par
+          end
           nodes
         end
 
-        # Returns list of ancestors, starting from parent until root.
+        # Returns list of descendants
         #
-        #   subchild1.ancestors # => [child1, root]
+        #   node.descendants # => [child1, child2, subchild1_1, subchild1_2, subchild2_1, subchild2_2]
         def descendants
-          nodes = children.dup
-          nodes.each{|child| nodes.concat(child.descendants)}
+          nodes = send(model.children_association_name).dup
+          send(model.children_association_name).each{|child| nodes.concat(child.descendants)}
           nodes 
         end
 
@@ -112,7 +122,11 @@ module Sequel
         #
         #   subchild1.self_and_siblings # => [subchild1, subchild2]
         def self_and_siblings
-          parent ? parent.children : model.roots
+          if parent = send(model.parent_association_name)
+            parent.send(model.children_association_name)
+          else
+            model.roots
+          end
         end
 
         # Returns all siblings of the current node.
@@ -127,6 +141,24 @@ module Sequel
         # True if if all parent columns values are not NULL.
         def possible_root?
           !Array(model.parent_column).map{|c| self[c]}.all?
+        end
+      end
+
+      module DatasetMethods
+        # Returns list of all root nodes (those with no parent nodes).
+        #
+        #   TreeClass.roots # => [root1, root2]
+        def roots
+          roots_dataset.all
+        end
+
+        # Returns the dataset for retrieval of all root nodes
+        #
+        #   TreeClass.roots_dataset # => Sequel::Dataset instance
+        def roots_dataset
+          ds = where(Sequel.or(Array(model.qualified_parent_column).zip([])))
+          ds = ds.order(*model.tree_order) if model.tree_order
+          ds
         end
       end
 

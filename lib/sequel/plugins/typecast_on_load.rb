@@ -1,6 +1,8 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
-    # The TypecastOnLoad plugin exists because most of Sequel's database adapters don't
+    # The typecast_on_load plugin exists because most of Sequel's database adapters don't
     # have complete control over typecasting, and may return columns that aren't
     # typecast correctly (with correct being defined as how the model object
     # would typecast the same column values).
@@ -21,7 +23,7 @@ module Sequel
     module TypecastOnLoad
       # Call add_typecast_on_load_columns on the passed column arguments.
       def self.configure(model, *columns)
-        model.instance_eval do
+        model.instance_exec do
           @typecast_on_load_columns ||= []
           add_typecast_on_load_columns(*columns)
         end
@@ -39,7 +41,16 @@ module Sequel
         # Typecast values using #load_typecast when the values are retrieved
         # from the database.
         def call(values)
-          super.load_typecast
+          o = super.load_typecast
+          o.send(:_clear_changed_columns, :initialize)
+          o
+        end
+
+        # Freeze typecast on load columns when freezing model class.
+        def freeze
+          @typecast_on_load_columns.freeze
+
+          super
         end
 
         Plugins.inherited_instance_variables(self, :@typecast_on_load_columns=>:dup)
@@ -51,10 +62,9 @@ module Sequel
         def load_typecast
           model.typecast_on_load_columns.each do |c|
             if v = values[c]
-              send("#{c}=", v)
+              set_column_value("#{c}=", v)
             end
           end
-          changed_columns.clear
           self
         end
 

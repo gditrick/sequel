@@ -1,23 +1,18 @@
+# frozen-string-literal: true
+#
 # The pg_interval extension adds support for PostgreSQL's interval type.
 #
-# This extension integrates with Sequel's native postgres adapter, so
-# that when interval type values are retrieved, they are parsed and returned
+# This extension integrates with Sequel's native postgres and jdbc/postgresql
+# adapters, so that when interval type values are retrieved, they are parsed and returned
 # as instances of ActiveSupport::Duration.
 #
 # In addition to the parser, this extension adds literalizers for
 # ActiveSupport::Duration that use the standard Sequel literalization
 # callbacks, so they work on all adapters.
 #
-# If you would like to use interval columns in your model objects, you
-# probably want to modify the typecasting so that it
-# recognizes and correctly handles the interval columns, which you can
-# do by:
+# To use this extension, load it into the Database instance:
 #
 #   DB.extension :pg_interval
-#
-# If you are not using the native postgres adapter and are using interval
-# types as model column values you probably should use the
-# pg_typecast_on_load plugin if the column values are returned as a string.
 #
 # This extension integrates with the pg_array extension.  If you plan
 # to use arrays of interval types, load the pg_array extension before the
@@ -31,22 +26,33 @@
 # very simple, and is only designed to parse PostgreSQL's default output
 # format, it is not designed to support all input formats that PostgreSQL
 # supports.
+#
+# See the {schema modification guide}[rdoc-ref:doc/schema_modification.rdoc]
+# for details on using interval columns in CREATE/ALTER TABLE statements.
+#
+# Related module: Sequel::Postgres::IntervalDatabaseMethods
 
+require 'active_support'
 require 'active_support/duration'
-Sequel.require 'adapters/utils/pg_types'
+
+# :nocov:
+begin
+  require 'active_support/version'
+rescue LoadError
+end
+# :nocov:
 
 module Sequel
   module Postgres
     module IntervalDatabaseMethods
-      EMPTY_INTERVAL = '0'.freeze
-      DURATION_UNITS = [:years, :months, :days, :minutes, :seconds].freeze
+      DURATION_UNITS = [:years, :months, :weeks, :days, :hours, :minutes, :seconds].freeze
 
       # Return an unquoted string version of the duration object suitable for
       # use as a bound variable.
       def self.literal_duration(duration)
         h = Hash.new(0)
         duration.parts.each{|unit, value| h[unit] += value}
-        s = ''
+        s = String.new
 
         DURATION_UNITS.each do |unit|
           if (v = h[unit]) != 0
@@ -55,7 +61,7 @@ module Sequel
         end
 
         if s.empty?
-          EMPTY_INTERVAL
+          '0'
         else
           s
         end
@@ -63,37 +69,47 @@ module Sequel
 
       # Creates callable objects that convert strings into ActiveSupport::Duration instances.
       class Parser
-        # Regexp that parses the full range of PostgreSQL interval type output.
-        PARSER = /\A([+-]?\d+ years?\s?)?([+-]?\d+ mons?\s?)?([+-]?\d+ days?\s?)?(?:(?:([+-])?(\d\d):(\d\d):(\d\d(\.\d+)?))|([+-]?\d+ hours?\s?)?([+-]?\d+ mins?\s?)?([+-]?\d+(\.\d+)? secs?\s?)?)?\z/o
+        # Whether ActiveSupport::Duration.new takes parts as array instead of hash
+        USE_PARTS_ARRAY = !defined?(ActiveSupport::VERSION::STRING) || ActiveSupport::VERSION::STRING < '5.1'
+
+        if defined?(ActiveSupport::Duration::SECONDS_PER_MONTH)
+          SECONDS_PER_MONTH = ActiveSupport::Duration::SECONDS_PER_MONTH
+          SECONDS_PER_YEAR = ActiveSupport::Duration::SECONDS_PER_YEAR
+        # :nocov:
+        else
+          SECONDS_PER_MONTH = 2592000
+          SECONDS_PER_YEAR = 31557600
+        # :nocov:
+        end
 
         # Parse the interval input string into an ActiveSupport::Duration instance.
         def call(string)
-          raise(InvalidValue, "invalid or unhandled interval format: #{string.inspect}") unless matches = PARSER.match(string)
+          raise(InvalidValue, "invalid or unhandled interval format: #{string.inspect}") unless matches = /\A([+-]?\d+ years?\s?)?([+-]?\d+ mons?\s?)?([+-]?\d+ days?\s?)?(?:(?:([+-])?(\d{2,10}):(\d\d):(\d\d(\.\d+)?))|([+-]?\d+ hours?\s?)?([+-]?\d+ mins?\s?)?([+-]?\d+(\.\d+)? secs?\s?)?)?\z/.match(string)
 
           value = 0
-          parts = []
+          parts = {}
 
           if v = matches[1]
             v = v.to_i
-            value += 31557600 * v
-            parts << [:years, v]
+            value += SECONDS_PER_YEAR * v
+            parts[:years] = v
           end
           if v = matches[2]
             v = v.to_i
-            value += 2592000 * v
-            parts << [:months, v]
+            value += SECONDS_PER_MONTH * v
+            parts[:months] = v
           end
           if v = matches[3]
             v = v.to_i
             value += 86400 * v
-            parts << [:days, v]
+            parts[:days] = v
           end
           if matches[5]
             seconds = matches[5].to_i * 3600 + matches[6].to_i * 60
             seconds += matches[8] ? matches[7].to_f : matches[7].to_i
             seconds *= -1 if matches[4] == '-'
             value += seconds
-            parts << [:seconds, seconds]
+            parts[:seconds] = seconds
           elsif matches[9] || matches[10] || matches[11]
             seconds = 0
             if v = matches[9]
@@ -106,8 +122,14 @@ module Sequel
               seconds += matches[12] ? v.to_f : v.to_i
             end
             value += seconds
-            parts << [:seconds, seconds]
+            parts[:seconds] = seconds
           end
+
+          # :nocov:
+          if USE_PARTS_ARRAY
+            parts = parts.to_a
+          end
+          # :nocov:
 
           ActiveSupport::Duration.new(value, parts)
         end
@@ -119,9 +141,12 @@ module Sequel
       # Reset the conversion procs if using the native postgres adapter,
       # and extend the datasets to correctly literalize ActiveSupport::Duration values.
       def self.extended(db)
-        db.instance_eval do
+        db.instance_exec do
           extend_datasets(IntervalDatasetMethods)
-          copy_conversion_procs([1186, 1187])
+          add_conversion_proc(1186, Postgres::IntervalDatabaseMethods::PARSER)
+          if respond_to?(:register_array_type)
+            register_array_type('interval', :oid=>1187, :scalar_oid=>1186)
+          end
           @schema_type_classes[:interval] = ActiveSupport::Duration
         end
       end
@@ -138,13 +163,13 @@ module Sequel
 
       private
 
-      # Handle arrays of interval types in bound variables.
-      def bound_variable_array(a)
-        case a
-        when ActiveSupport::Duration
-          "\"#{IntervalDatabaseMethods.literal_duration(a)}\""
-        else
-          super
+      # Set the :ruby_default value if the default value is recognized as an interval.
+      def schema_post_process(_)
+        super.each do |a|
+          h = a[1]
+          if h[:type] == :interval && h[:default] =~ /\A'([\w ]+)'::interval\z/
+            h[:ruby_default] = PARSER.call($1)
+          end
         end
       end
 
@@ -162,7 +187,7 @@ module Sequel
         when Numeric
           ActiveSupport::Duration.new(value, [[:seconds, value]])
         when String
-          PARSER.call(value)
+          PARSER.call(typecast_check_string_length(value, 1000))
         else
           raise Sequel::InvalidValue, "invalid value for interval type: #{value.inspect}"
         end
@@ -170,7 +195,16 @@ module Sequel
     end
 
     module IntervalDatasetMethods
-      CAST_INTERVAL = '::interval'.freeze
+      private
+
+      # Allow auto parameterization of ActiveSupport::Duration instances.
+      def auto_param_type_fallback(v)
+        if defined?(super) && (type = super)
+          type
+        elsif ActiveSupport::Duration === v
+          "::interval"
+        end
+      end
 
       # Handle literalization of ActiveSupport::Duration objects, treating them as
       # PostgreSQL intervals.
@@ -178,16 +212,11 @@ module Sequel
         case v
         when ActiveSupport::Duration
           literal_append(sql, IntervalDatabaseMethods.literal_duration(v))
-          sql << CAST_INTERVAL
+          sql << '::interval'
         else
           super
         end
       end
-    end
-
-    PG_TYPES[1186] = Postgres::IntervalDatabaseMethods::PARSER
-    if defined?(PGArray) && PGArray.respond_to?(:register)
-      PGArray.register('interval', :oid=>1187, :scalar_oid=>1186)
     end
   end
 

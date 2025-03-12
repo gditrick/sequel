@@ -1,18 +1,23 @@
+# frozen-string-literal: true
+
+require_relative '../utils/emulate_offset_with_reverse_and_count'
+require_relative '../utils/unmodified_identifiers'
+require_relative '../utils/columns_limit_1'
+
 module Sequel
-  require 'adapters/utils/emulate_offset_with_reverse_and_count'
-
   module Access
-    module DatabaseMethods
-      extend Sequel::Database::ResetIdentifierMangling
+    Sequel::Database.set_shared_adapter_scheme(:access, self)
 
-      # Access uses type :access as the database_type
+    module DatabaseMethods
+      include UnmodifiedIdentifiers::DatabaseMethods
+
       def database_type
         :access
       end
 
       # Doesn't work, due to security restrictions on MSysObjects
       #def tables
-      #  from(:MSysObjects).filter(:Type=>1, :Flags=>0).select_map(:Name).map{|x| x.to_sym}
+      #  from(:MSysObjects).where(Type: 1, Flags: 0).select_map(:Name).map(&:to_sym)
       #end
       
       # Access doesn't support renaming tables from an SQL query,
@@ -29,13 +34,8 @@ module Sequel
 
       private
 
-      def alter_table_op_sql(table, op)
-        case op[:op]
-        when :set_column_type
-          "ALTER COLUMN #{quote_identifier(op[:name])} #{type_literal(op)}"
-        else
-          super
-        end
+      def alter_table_set_column_type_sql(table, op)
+        "ALTER COLUMN #{quote_identifier(op[:name])} #{type_literal(op)}"
       end
 
       # Access doesn't support CREATE TABLE AS, it only supports SELECT INTO.
@@ -57,22 +57,21 @@ module Sequel
         DATABASE_ERROR_REGEXPS
       end
 
-      # The SQL to drop an index for the table.
+      # Access's Byte type will accept much larger values,
+      # even though it only stores 0-255.  Do not set min/max
+      # values for the Byte type.
+      def column_schema_integer_min_max_values(column)
+        return if /byte/i =~ column[:db_type]
+        super
+      end
+
       def drop_index_sql(table, op)
         "DROP INDEX #{quote_identifier(op[:name] || default_index_name(table, op[:columns]))} ON #{quote_schema_table(table)}"
       end
       
-      def identifier_input_method_default
-        nil
-      end
-      
-      def identifier_output_method_default
-        nil
-      end
-      
       # Access doesn't have a 64-bit integer type, so use integer and hope
       # the user isn't using more than 32 bits.
-      def type_literal_generic_bignum(column)
+      def type_literal_generic_bignum_symbol(column)
         :integer
       end
 
@@ -88,34 +87,20 @@ module Sequel
     end
   
     module DatasetMethods
+      include(Module.new do
+        Sequel.set_temp_name(self){"Sequel::Access::DatasetMethods::_SQLMethods"}
+        Dataset.def_sql_method(self, :select, %w'select distinct limit columns into from join where group order having compounds')
+      end)
       include EmulateOffsetWithReverseAndCount
+      include UnmodifiedIdentifiers::DatasetMethods
+      include ::Sequel::Dataset::ColumnsLimit1
 
-      SELECT_CLAUSE_METHODS = Dataset.clause_methods(:select, %w'select distinct limit columns into from join where group order having compounds')
-      DATE_FORMAT = '#%Y-%m-%d#'.freeze
-      TIMESTAMP_FORMAT = '#%Y-%m-%d %H:%M:%S#'.freeze
-      TOP = " TOP ".freeze
-      BRACKET_CLOSE = Dataset::BRACKET_CLOSE
-      BRACKET_OPEN = Dataset::BRACKET_OPEN
-      PAREN_CLOSE = Dataset::PAREN_CLOSE
-      PAREN_OPEN = Dataset::PAREN_OPEN
-      INTO = Dataset::INTO
-      FROM = Dataset::FROM
-      SPACE = Dataset::SPACE
-      NOT_EQUAL = ' <> '.freeze
-      OPS = {:'%'=>' Mod '.freeze, :'||'=>' & '.freeze}
-      BOOL_FALSE = '0'.freeze
-      BOOL_TRUE = '-1'.freeze
-      DATE_FUNCTION = 'Date()'.freeze
-      NOW_FUNCTION = 'Now()'.freeze
-      TIME_FUNCTION = 'Time()'.freeze
-      CAST_TYPES = {String=>:CStr, Integer=>:CLng, Date=>:CDate, Time=>:CDate, DateTime=>:CDate, Numeric=>:CDec, BigDecimal=>:CDec, File=>:CStr, Float=>:CDbl, TrueClass=>:CBool, FalseClass=>:CBool}
+      EXTRACT_MAP = {:year=>"'yyyy'", :month=>"'m'", :day=>"'d'", :hour=>"'h'", :minute=>"'n'", :second=>"'s'"}.freeze
+      EXTRACT_MAP.each_value(&:freeze)
+      OPS = {:'%'=>' Mod '.freeze, :'||'=>' & '.freeze}.freeze
+      CAST_TYPES = {String=>:CStr, Integer=>:CLng, Date=>:CDate, Time=>:CDate, DateTime=>:CDate, Numeric=>:CDec, BigDecimal=>:CDec, File=>:CStr, Float=>:CDbl, TrueClass=>:CBool, FalseClass=>:CBool}.freeze
 
-      EXTRACT_MAP = {:year=>"'yyyy'", :month=>"'m'", :day=>"'d'", :hour=>"'h'", :minute=>"'n'", :second=>"'s'"}
-      COMMA = Dataset::COMMA
-      DATEPART_OPEN = "datepart(".freeze
-
-      # Access doesn't support CASE, but it can be emulated with nested
-      # IIF function calls.
+      # Access doesn't support CASE, so emulate it with nested IIF function calls.
       def case_expression_sql_append(sql, ce)
         literal_append(sql, ce.with_merged_expression.conditions.reverse.inject(ce.default){|exp,(cond,val)| Sequel::SQL::Function.new(:IIF, cond, val, exp)})
       end
@@ -124,9 +109,9 @@ module Sequel
       # type conversion
       def cast_sql_append(sql, expr, type)
         sql << CAST_TYPES.fetch(type, type).to_s
-        sql << PAREN_OPEN
+        sql << '('
         literal_append(sql, expr)
-        sql << PAREN_CLOSE
+        sql << ')'
       end
 
       def complex_expression_sql_append(sql, op, args)
@@ -135,20 +120,14 @@ module Sequel
           complex_expression_sql_append(sql, :LIKE, args)
         when :'NOT ILIKE'
           complex_expression_sql_append(sql, :'NOT LIKE', args)
-        when :LIKE, :'NOT LIKE'
-          sql << PAREN_OPEN
-          literal_append(sql, args.at(0))
-          sql << SPACE << op.to_s << SPACE
-          literal_append(sql, args.at(1))
-          sql << PAREN_CLOSE
         when :'!='
-          sql << PAREN_OPEN
-          literal_append(sql, args.at(0))
-          sql << NOT_EQUAL
-          literal_append(sql, args.at(1))
-          sql << PAREN_CLOSE
+          sql << '('
+          literal_append(sql, args[0])
+          sql << ' <> '
+          literal_append(sql, args[1])
+          sql << ')'
         when :'%', :'||'
-          sql << PAREN_OPEN
+          sql << '('
           c = false
           op_str = OPS[op]
           args.each do |a|
@@ -156,27 +135,33 @@ module Sequel
             literal_append(sql, a)
             c ||= true
           end
-          sql << PAREN_CLOSE
+          sql << ')'
+        when :**
+          sql << '('
+          literal_append(sql, args[0])
+          sql << ' ^ '
+          literal_append(sql, args[1])
+          sql << ')'
         when :extract
-          part = args.at(0)
+          part = args[0]
           raise(Sequel::Error, "unsupported extract argument: #{part.inspect}") unless format = EXTRACT_MAP[part]
-          sql << DATEPART_OPEN << format.to_s << COMMA
-          literal_append(sql, args.at(1))
-          sql << PAREN_CLOSE
+          sql << "datepart(" << format.to_s << ', '
+          literal_append(sql, args[1])
+          sql << ')'
         else
           super
         end
       end
 
-      # Use Date() and Now() for CURRENT_DATE and CURRENT_TIMESTAMP
+      # Use Date(), Now(), and Time() for CURRENT_DATE, CURRENT_TIMESTAMP, and CURRENT_TIME
       def constant_sql_append(sql, constant)
         case constant
         when :CURRENT_DATE
-          sql << DATE_FUNCTION
+          sql << 'Date()'
         when :CURRENT_TIMESTAMP
-          sql << NOW_FUNCTION
+          sql << 'Now()'
         when :CURRENT_TIME
-          sql << TIME_FUNCTION
+          sql << 'Time()'
         else
           super
         end
@@ -187,15 +172,6 @@ module Sequel
         clone(:from=>@opts[:from] + [table])
       end
 
-      def emulated_function_sql_append(sql, f)
-        case f.f
-        when :char_length
-          literal_append(sql, SQL::Function.new(:len, f.args.first))
-        else
-          super
-        end
-      end
-      
       # Access uses [] to escape metacharacters, instead of backslashes.
       def escape_like(string)
         string.gsub(/[\\*#?\[]/){|m| "[#{m}]"}
@@ -204,6 +180,17 @@ module Sequel
       # Specify a table for a SELECT ... INTO query.
       def into(table)
         clone(:into => table)
+      end
+
+      # Access uses [] for quoting identifiers, and can't handle
+      # ] inside identifiers.
+      def quoted_identifier_append(sql, v)
+        sql << '[' << v.to_s << ']'
+      end
+
+      # Access does not support derived column lists.
+      def supports_derived_column_lists?
+        false
       end
 
       # Access doesn't support INTERSECT or EXCEPT
@@ -236,31 +223,50 @@ module Sequel
 
       # Access uses # to quote dates
       def literal_date(d)
-        d.strftime(DATE_FORMAT)
+        d.strftime('#%Y-%m-%d#')
       end
 
       # Access uses # to quote datetimes
       def literal_datetime(t)
-        t.strftime(TIMESTAMP_FORMAT)
+        t.strftime('#%Y-%m-%d %H:%M:%S#')
       end
       alias literal_time literal_datetime
 
       # Use 0 for false on MSSQL
       def literal_false
-        BOOL_FALSE
+        '0'
       end
 
-      # Use 0 for false on MSSQL
+      # Use -1 for true on MSSQL
       def literal_true
-        BOOL_TRUE
+        '-1'
+      end
+
+      # Emulate the char_length function with len
+      def native_function_name(emulated_function)
+        if emulated_function == :char_length
+          'len'
+        else
+          super
+        end
+      end
+
+      # Access does not natively support NULLS FIRST/LAST.
+      def requires_emulating_nulls_first?
+        true
+      end
+
+      # Access doesn't support ESCAPE for LIKE.
+      def requires_like_escape?
+        false
       end
 
       # Access requires parentheses when joining more than one table
       def select_from_sql(sql)
         if f = @opts[:from]
-          sql << FROM
+          sql << ' FROM '
           if (j = @opts[:join]) && !j.empty?
-            sql << (PAREN_OPEN * j.length)
+            sql << ('(' * j.length)
           end
           source_list_append(sql, f)
         end
@@ -268,7 +274,7 @@ module Sequel
 
       def select_into_sql(sql)
         if i = @opts[:into]
-          sql << INTO
+          sql << " INTO "
           identifier_append(sql, i)
         end
       end
@@ -278,7 +284,7 @@ module Sequel
         if js = @opts[:join]
           js.each do |j|
             literal_append(sql, j)
-            sql << PAREN_CLOSE
+            sql << ')'
           end
         end
       end
@@ -286,19 +292,9 @@ module Sequel
       # Access uses TOP for limits
       def select_limit_sql(sql)
         if l = @opts[:limit]
-          sql << TOP
+          sql << " TOP "
           literal_append(sql, l)
         end
-      end
-
-      # Access uses [] for quoting identifiers
-      def quoted_identifier_append(sql, v)
-        sql << BRACKET_OPEN << v.to_s << BRACKET_CLOSE
-      end
-
-      # Access requires the limit clause come before other clauses
-      def select_clause_methods
-        SELECT_CLAUSE_METHODS
       end
     end
   end

@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The inflector extension adds inflection instance methods to String, which allows the easy transformation of
 # words from singular to plural, class names to table names, modularized class
 # names to ones without, and class names to foreign keys.  It exists for 
@@ -6,6 +8,8 @@
 # To load the extension:
 #
 #   Sequel.extension :inflector
+#
+# Related module: String::Inflections
 
 class String
   # This module acts as a singleton returned/yielded by String.inflections,
@@ -91,15 +95,23 @@ class String
       (@uncountables << words).flatten!
     end
 
-    Sequel.require('default_inflections', 'model')
-    instance_eval(&Sequel::DEFAULT_INFLECTIONS_PROC)
+    require_relative '../model/default_inflections'
+    instance_exec(&Sequel::DEFAULT_INFLECTIONS_PROC)
   end
 
   # Yield the Inflections module if a block is given, and return
   # the Inflections module.
   def self.inflections
-    yield Inflections if block_given?
+    yield Inflections if defined?(yield)
     Inflections
+  end
+  
+  %w'classify constantize dasherize demodulize foreign_key humanize pluralize singularize tableize underscore'.each do |m|
+    # :nocov:
+    if method_defined?(m)
+      alias_method(m, m)
+    end
+    # :nocov:
   end
 
   # By default, camelize converts the string to UpperCamelCase. If the argument to camelize
@@ -147,7 +159,7 @@ class String
   # Example
   #   "puni_puni".dasherize #=> "puni-puni"
   def dasherize
-    gsub(/_/, '-')
+    gsub('_', '-')
   end
 
   # Removes the module part from the expression in the string
@@ -177,7 +189,7 @@ class String
   #   "employee_salary" #=> "Employee salary"
   #   "author_id" #=> "Author"
   def humanize
-    gsub(/_id$/, "").gsub(/_/, " ").capitalize
+    gsub(/_id$/, "").gsub('_', " ").capitalize
   end
 
   # Returns the plural form of the word in the string.

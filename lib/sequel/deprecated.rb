@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   # This module makes it easy to print deprecation warnings with optional backtraces to a given stream.
   # There are a two accessors you can use to change how/where the deprecation methods are printed
@@ -18,7 +20,7 @@ module Sequel
   module Deprecation
     @backtrace_filter = 10
     @output = $stderr
-    @prefix = "SEQUEL DEPRECATION WARNING: "
+    @prefix = "SEQUEL DEPRECATION WARNING: ".freeze
 
     class << self
       # How to filter backtraces.  +false+ does not include backtraces, +true+ includes
@@ -37,7 +39,7 @@ module Sequel
     # Print the message and possibly backtrace to the output.
     def self.deprecate(method, instead=nil)
       return unless output
-      message = instead ? "#{method} is deprecated and will be removed in a future version of Sequel.  #{instead}." : method
+      message = instead ? "#{method} is deprecated and will be removed in Sequel 6.  #{instead}." : method
       message = "#{prefix}#{message}" if prefix
       output.puts(message)
       case b = backtrace_filter
@@ -53,6 +55,16 @@ module Sequel
         caller.each_with_index{|line, line_no| output.puts(line) if b.call(line, line_no)}
       end
       nil
+    end
+
+    # If using ruby 2.3+, use Module#deprecate_constant to deprecate the constant,
+    # otherwise do nothing as the ruby implementation does not support constant deprecation.
+    def self.deprecate_constant(mod, constant)
+      # :nocov:
+      if RUBY_VERSION > '2.3'
+      # :nocov:
+        mod.deprecate_constant(constant)
+      end
     end
   end
 end

@@ -1,17 +1,18 @@
 #!/usr/bin/env ruby
+# frozen-string-literal: true
 
-require 'rubygems'
 require 'optparse'
-require 'sequel'
 
 code = nil
 copy_databases = nil
 dump_migration = nil
 dump_schema = nil
+dump_indexes = nil
 env = nil
 migrate_dir = nil
 migrate_ver = nil
 backtrace = nil
+show_version = false
 test = true
 load_dirs = []
 exclusive_options = []
@@ -26,7 +27,7 @@ options = OptionParser.new do |opts|
   opts.separator "  sequel postgres://localhost/my_blog"
   opts.separator "  sequel config/database.yml"
   opts.separator ""
-  opts.separator "For more information see http://sequel.rubyforge.org"
+  opts.separator "For more information see http://sequel.jeremyevans.net"
   opts.separator ""
   opts.separator "Options:"
 
@@ -42,6 +43,7 @@ options = OptionParser.new do |opts|
   
   opts.on("-C", "--copy-databases", "copy one database to another") do 
     copy_databases = true
+    exclusive_options << :C
   end
   
   opts.on("-d", "--dump-migration", "print database migration to STDOUT") do 
@@ -59,8 +61,7 @@ options = OptionParser.new do |opts|
   end
   
   opts.on("-E", "--echo", "echo SQL statements") do
-    require 'logger'
-    loggers << Logger.new($stdout)
+    loggers << $stdout
   end
   
   opts.on("-I", "--include dir", "specify $LOAD_PATH directory") do |v|
@@ -68,8 +69,9 @@ options = OptionParser.new do |opts|
   end
 
   opts.on("-l", "--log logfile", "log SQL statements to log file") do |v|
-    require 'logger'
-    loggers << Logger.new(v)
+    file = File.open(v, 'a')
+    file.sync = true
+    loggers << file
   end
   
   opts.on("-L", "--load-dir DIR", "loads all *.rb under specifed directory") do |v|
@@ -82,7 +84,7 @@ options = OptionParser.new do |opts|
   end
   
   opts.on("-M", "--migrate-version VER", "migrate the database to version given") do |v|
-    migrate_ver = Integer(v)
+    migrate_ver = Integer(v, 10)
   end
 
   opts.on("-N", "--no-test-connection", "do not test the connection") do
@@ -103,8 +105,12 @@ options = OptionParser.new do |opts|
   end
   
   opts.on_tail("-v", "--version", "Show version") do
-    puts "sequel #{Sequel.version}"
-    exit
+    show_version = true
+  end
+
+  opts.on("-X", "--dump-indexes filename", "dump the index cache for all tables to the file") do |v|
+    dump_indexes = v
+    exclusive_options << :X
   end
 end
 opts = options
@@ -116,45 +122,70 @@ error_proc = lambda do |msg|
   $stderr.puts(msg)
   exit 1
 end
+extra_proc = lambda do
+  $stderr.puts("Warning: last #{ARGV.length} arguments ignored") unless ARGV.empty?
+end
 
 error_proc["Error: Must specify -m if using -M"] if migrate_ver && !migrate_dir
 error_proc["Error: Cannot specify #{exclusive_options.map{|v| "-#{v}"}.join(' and ')} together"] if exclusive_options.length > 1
 
 connect_proc = lambda do |database|
-  db = if database.nil? || database.empty?
-    Sequel.connect('mock:///')
+  db_opts = {:test=>test, :loggers=>loggers}
+  if database.nil? || database.empty?
+    Sequel.connect('mock:///', db_opts)
   elsif File.exist?(database)
     require 'yaml'
     env ||= "development"
     db_config = YAML.load_file(database)
     db_config = db_config[env] || db_config[env.to_sym] || db_config
     db_config.keys.each{|k| db_config[k.to_sym] = db_config.delete(k)}
-    Sequel.connect(db_config)
+    Sequel.connect(db_config, db_opts)
   else
-    Sequel.connect(database)
+    Sequel.connect(database, db_opts)
   end
-  db.loggers = loggers
-  db.test_connection if test
-  db
 end
 
 begin
+  $:.unshift(File.expand_path(File.join(File.dirname(__FILE__), '..', 'lib')))
+  require 'sequel'
+  if show_version
+    puts "sequel #{Sequel.version}"
+    unless db || code
+      exit
+    end
+  end
+
+  unless loggers.empty?
+    Sequel.extension :stdio_logger
+    loggers.map!{|io| Sequel::StdioLogger.new(io)}
+  end
+
   DB = connect_proc[db]
   load_dirs.each{|d| d.is_a?(Array) ? require(d.first) : Dir["#{d}/**/*.rb"].each{|f| load(f)}}
   if migrate_dir
+    extra_proc.call
     Sequel.extension :migration, :core_extensions
     Sequel::Migrator.apply(DB, migrate_dir, migrate_ver)
     exit
   end
   if dump_migration
+    extra_proc.call
     DB.extension :schema_dumper
     puts DB.dump_schema_migration(:same_db=>dump_migration==:same_db)
     exit
   end
   if dump_schema
+    extra_proc.call
     DB.extension :schema_caching
     DB.tables.each{|t| DB.schema(Sequel::SQL::Identifier.new(t))}
     DB.dump_schema_cache(dump_schema)
+    exit
+  end
+  if dump_indexes
+    extra_proc.call
+    DB.extension :index_caching
+    DB.tables.each{|t| DB.indexes(Sequel::SQL::Identifier.new(t))}
+    DB.dump_index_cache(dump_indexes)
     exit
   end
   if copy_databases
@@ -163,11 +194,20 @@ begin
 
     db2 = ARGV.shift
     error_proc["Error: Must specify database connection string or path to yaml file as second argument for database you want to copy to"] if db2.nil? || db2.empty?
+    extra_proc.call
     start_time = Time.now
     TO_DB = connect_proc[db2]
     same_db = DB.database_type==TO_DB.database_type
     index_opts = {:same_db=>same_db}
+
+    # :nocov:
     index_opts[:index_names] = :namespace if !DB.global_index_namespace? && TO_DB.global_index_namespace?
+    # :nocov:
+
+    if DB.database_type == :sqlite && !same_db
+      # SQLite integer types allows 64-bit integers
+      TO_DB.extension :integer64
+    end
 
     puts "Databases connections successful"
     schema_migration = eval(DB.dump_schema_migration(:indexes=>false, :same_db=>same_db))
@@ -181,18 +221,20 @@ begin
     puts "Begin copying data"
     DB.transaction do
       TO_DB.transaction do
+        all_status_lines = ENV['SEQUEL_BIN_STATUS_ALL_LINES']
+
         DB.tables.each do |table|
           puts "Begin copying records for table: #{table}"
           time = Time.now
           to_ds = TO_DB.from(table)
           j = 0
           DB.from(table).each do |record|
-            if Time.now - time > 5
+            to_ds.insert(record)
+            j += 1
+            if Time.now - time > 5 || all_status_lines
               puts "Status: #{j} records copied" 
               time = Time.now
             end
-            to_ds.insert(record)
-            j += 1
           end
           puts "Finished copying #{j} records for table: #{table}"
         end
@@ -216,20 +258,23 @@ begin
     exit
   end
   if code
+    extra_proc.call
     eval(code)
     exit
   end
 rescue => e
   raise e if backtrace
-  error_proc["Error: #{e.class}: #{e.message}#{e.backtrace.first}"]
+  error_proc["Error: #{e.class}: #{e.message}\n#{e.backtrace.first}"]
 end
 
 if !ARGV.empty? 
   ARGV.each{|v| load(v)}
 elsif !$stdin.isatty
   eval($stdin.read)
+# :nocov:
 else
   require 'irb'
   puts "Your database is stored in DB..."
   IRB.start
 end
+# :nocov:

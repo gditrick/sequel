@@ -1,8 +1,10 @@
+# frozen-string-literal: true
+
 module Sequel
   # Yield the Inflections module if a block is given, and return
   # the Inflections module.
   def self.inflections
-    yield Inflections if block_given?
+    yield Inflections if defined?(yield)
     Inflections
   end
 
@@ -23,19 +25,6 @@ module Sequel
   # pluralization and singularization rules that is runs. This guarantees that your rules run before any of the rules that may
   # already have been loaded.
   module Inflections
-    CAMELIZE_CONVERT_REGEXP = /(^|_)(.)/.freeze
-    CAMELIZE_MODULE_REGEXP = /\/(.?)/.freeze
-    DASH = '-'.freeze
-    DEMODULIZE_CONVERT_REGEXP = /^.*::/.freeze
-    EMPTY_STRING= ''.freeze
-    SLASH = '/'.freeze
-    VALID_CONSTANT_NAME_REGEXP = /\A(?:::)?([A-Z]\w*(?:::[A-Z]\w*)*)\z/.freeze
-    UNDERSCORE = '_'.freeze
-    UNDERSCORE_CONVERT_REGEXP1 = /([A-Z]+)([A-Z][a-z])/.freeze
-    UNDERSCORE_CONVERT_REGEXP2 = /([a-z\d])([A-Z])/.freeze
-    UNDERSCORE_CONVERT_REPLACE = '\1_\2'.freeze
-    UNDERSCORE_MODULE_REGEXP = /::/.freeze
-
     @plurals, @singulars, @uncountables = [], [], []
 
     class << self
@@ -103,7 +92,7 @@ module Sequel
       (@uncountables << words).flatten!
     end
 
-    instance_eval(&DEFAULT_INFLECTIONS_PROC)
+    instance_exec(&DEFAULT_INFLECTIONS_PROC)
 
     private
 
@@ -111,7 +100,7 @@ module Sequel
     def camelize(s)
       s = s.to_s
       return s.camelize if s.respond_to?(:camelize)
-      s = s.gsub(CAMELIZE_MODULE_REGEXP){|x| "::#{x[-1..-1].upcase unless x == SLASH}"}.gsub(CAMELIZE_CONVERT_REGEXP){|x| x[-1..-1].upcase}
+      s = s.gsub(/\/(.?)/){|x| "::#{x[-1..-1].upcase unless x == '/'}"}.gsub(/(^|_)(.)/){|x| x[-1..-1].upcase}
       s
     end
   
@@ -121,7 +110,7 @@ module Sequel
     def constantize(s)
       s = s.to_s
       return s.constantize if s.respond_to?(:constantize)
-      raise(NameError, "#{s.inspect} is not a valid constant name!") unless m = VALID_CONSTANT_NAME_REGEXP.match(s)
+      raise(NameError, "#{s.inspect} is not a valid constant name!") unless m = /\A(?:::)?([A-Z]\w*(?:::[A-Z]\w*)*)\z/.match(s)
       Object.module_eval("::#{m[1]}", __FILE__, __LINE__)
     end
   
@@ -129,7 +118,7 @@ module Sequel
     def demodulize(s)
       s = s.to_s
       return s.demodulize if s.respond_to?(:demodulize)
-      s.gsub(DEMODULIZE_CONVERT_REGEXP, EMPTY_STRING)
+      s.gsub(/^.*::/, '')
     end
   
     # Returns the plural form of the word in the string.
@@ -155,8 +144,8 @@ module Sequel
     def underscore(s)
       s = s.to_s
       return s.underscore if s.respond_to?(:underscore)
-      s.gsub(UNDERSCORE_MODULE_REGEXP, SLASH).gsub(UNDERSCORE_CONVERT_REGEXP1, UNDERSCORE_CONVERT_REPLACE).
-        gsub(UNDERSCORE_CONVERT_REGEXP2, UNDERSCORE_CONVERT_REPLACE).tr(DASH, UNDERSCORE).downcase
+      s.gsub('::', '/').gsub(/([A-Z]+)([A-Z][a-z])/, '\1_\2').
+        gsub(/([a-z\d])([A-Z])/, '\1_\2').tr('-', '_').downcase
     end
   end
 end

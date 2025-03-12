@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The pg_row_ops extension adds support to Sequel's DSL to make
 # it easier to deal with PostgreSQL row-valued/composite types.
 #
@@ -17,10 +19,10 @@
 # Also, on most Sequel expression objects, you can call the pg_row
 # method:
 #
-#   r = Sequel.expr(:row_column).pg_row
+#   r = Sequel[:row_column].pg_row
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Symbol#pg_row:
 #
 #   r = :row_column.pg_row
@@ -68,30 +70,28 @@
 #
 # By casting the expression, you can get a composite type returned:
 #
-#   DB[:a].select(a.splat).first # SELECT (a.*)::a FROM a
+#   DB[:a].select(a.splat(:a)).first # SELECT (a.*)::a FROM a
 #   # => {:a=>"(1,2)"} # or {:a=>{:a=>1, :b=>2}} if the "a" type has been registered
-#                      # with the the pg_row extension
+#                      # with the pg_row extension
 #
 # This feature is mostly useful for a different way to graph tables:
 #
-#   DB[:a].join(:b, :id=>:b_id).select(Sequel.pg_row_op(:a).splat(:a),
-#                                      Sequel.pg_row_op(:b).splat(:b))
+#   DB[:a].join(:b, id: :b_id).select(Sequel.pg_row_op(:a).splat(:a),
+#                                     Sequel.pg_row_op(:b).splat(:b))
 #   # SELECT (a.*)::a, (b.*)::b FROM a INNER JOIN b ON (b.id = a.b_id)
 #   # => {:a=>{:id=>1, :b_id=>2}, :b=>{:id=>2}}
+#
+# Related module: Sequel::Postgres::PGRowOp
 
+#
 module Sequel
   module Postgres
     # This class represents a composite type expression reference.
     class PGRowOp < SQL::PlaceholderLiteralString
-      OPEN = '('.freeze
-      CLOSE_DOT = ').'.freeze
-      CLOSE_STAR = '.*)'.freeze
-      CLOSE_STAR_CAST = '.*)::'.freeze
-      EMPTY = "".freeze
-      ROW = [OPEN, CLOSE_STAR].freeze
-      ROW_CAST = [OPEN, CLOSE_STAR_CAST].freeze
-      QUALIFY = [OPEN, CLOSE_DOT].freeze
-      WRAP = [EMPTY].freeze
+      ROW = ['(', '.*)'].freeze.each(&:freeze)
+      ROW_CAST = ['(', '.*)::'].freeze.each(&:freeze)
+      QUALIFY = ['(', ').'].freeze.each(&:freeze)
+      WRAP = [""].freeze.each(&:freeze)
 
       # Wrap the expression in a PGRowOp, without changing the
       # SQL it would use.
@@ -158,6 +158,30 @@ module Sequel
         end
       end
     end
+
+    # :nocov:
+    if defined?(PGRow::ArrayRow)
+    # :nocov:
+      class PGRow::ArrayRow
+        # Wrap the PGRow::ArrayRow instance in an PGRowOp, allowing you to easily use
+        # the PostgreSQL row functions and operators with literal rows.
+        def op
+          Sequel.pg_row_op(self)
+        end
+      end
+    end
+
+    # :nocov:
+    if defined?(PGRow::HashRow)
+    # :nocov:
+      class PGRow::HashRow
+        # Wrap the PGRow::ArrayRow instance in an PGRowOp, allowing you to easily use
+        # the PostgreSQL row functions and operators with literal rows.
+        def op
+          Sequel.pg_row_op(self)
+        end
+      end
+    end
   end
 
   module SQL::Builders
@@ -186,7 +210,7 @@ end
 if defined?(Sequel::CoreRefinements)
   module Sequel::CoreRefinements
     refine Symbol do
-      include Sequel::Postgres::PGRowOp::ExpressionMethods
+      send INCLUDE_METH, Sequel::Postgres::PGRowOp::ExpressionMethods
     end
   end
 end

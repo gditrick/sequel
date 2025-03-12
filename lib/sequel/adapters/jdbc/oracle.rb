@@ -1,20 +1,47 @@
-Sequel.require 'adapters/shared/oracle'
-Sequel.require 'adapters/jdbc/transactions'
+# frozen-string-literal: true
+
+Sequel::JDBC.load_driver('Java::OracleJdbcDriver::OracleDriver')
+require_relative '../shared/oracle'
+require_relative 'transactions'
 
 module Sequel
   module JDBC
-    # Database and Dataset support for Oracle databases accessed via JDBC.
-    module Oracle
-      # Instance methods for Oracle Database objects accessed via JDBC.
-      module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
-        PRIMARY_KEY_INDEX_RE = /\Asys_/i.freeze
+    Sequel.synchronize do
+      DATABASE_SETUP[:oracle] = proc do |db|
+        db.extend(Sequel::JDBC::Oracle::DatabaseMethods)
+        db.dataset_class = Sequel::JDBC::Oracle::Dataset
+        Java::OracleJdbcDriver::OracleDriver
+      end
+    end
 
+    module Oracle
+      JAVA_BIG_DECIMAL_CONSTRUCTOR = Java::JavaMath::BigDecimal.java_class.constructor(Java::long).method(:new_instance)
+      ORACLE_DECIMAL = Object.new
+      def ORACLE_DECIMAL.call(r, i)
+        if v = r.getBigDecimal(i)
+          i = v.long_value
+          if v == JAVA_BIG_DECIMAL_CONSTRUCTOR.call(i)
+            i
+          else
+            ::Kernel::BigDecimal(v.to_string)
+          end
+        end
+      end 
+
+      ORACLE_CLOB = Object.new
+      def ORACLE_CLOB.call(r, i)
+        return unless clob = r.getClob(i)
+        str = clob.getSubString(1, clob.length)
+        clob.freeTemporary if clob.isTemporary
+        str
+      end
+
+      module DatabaseMethods
         include Sequel::Oracle::DatabaseMethods
         include Sequel::JDBC::Transactions
 
         def self.extended(db)
-          db.instance_eval do
+          db.instance_exec do
             @autosequence = opts[:autosequence]
             @primary_key_sequences = {}
           end
@@ -31,6 +58,11 @@ module Sequel
           super || exception.message =~ /\AClosed Connection/
         end
 
+        # Default the fetch size for statements to 100, similar to the oci8-based oracle adapter.
+        def default_fetch_size
+          100
+        end
+        
         def last_insert_id(conn, opts)
           unless sequence = opts[:sequence]
             if t = opts[:table]
@@ -41,10 +73,10 @@ module Sequel
             sql = "SELECT #{literal(sequence)}.currval FROM dual"
             statement(conn) do |stmt|
               begin
-                rs = log_yield(sql){stmt.executeQuery(sql)}
+                rs = log_connection_yield(sql, conn){stmt.executeQuery(sql)}
                 rs.next
-                rs.getInt(1)
-              rescue java.sql.SQLException
+                rs.getLong(1)
+              rescue Java::JavaSql::SQLException
                 nil
               end
             end
@@ -53,7 +85,7 @@ module Sequel
 
         # Primary key indexes appear to start with sys_ on Oracle
         def primary_key_index_re
-          PRIMARY_KEY_INDEX_RE
+          /\Asys_/i
         end
 
         def schema_parse_table(*)
@@ -76,50 +108,34 @@ module Sequel
         def supports_releasing_savepoints?
           false
         end
+
+        def setup_type_convertor_map
+          super
+          @type_convertor_map[:OracleDecimal] = ORACLE_DECIMAL
+          @type_convertor_map[:OracleClob] = ORACLE_CLOB
+        end
       end
       
-      # Dataset class for Oracle datasets accessed via JDBC.
       class Dataset < JDBC::Dataset
         include Sequel::Oracle::DatasetMethods
 
-        private
+        NUMERIC_TYPE = Java::JavaSQL::Types::NUMERIC
+        TIMESTAMP_TYPE = Java::JavaSQL::Types::TIMESTAMP
+        CLOB_TYPE = Java::JavaSQL::Types::CLOB
+        TIMESTAMPTZ_TYPES = [Java::OracleJdbc::OracleTypes::TIMESTAMPTZ, Java::OracleJdbc::OracleTypes::TIMESTAMPLTZ].freeze
 
-        JAVA_BIG_DECIMAL = ::Sequel::JDBC::Dataset::JAVA_BIG_DECIMAL
-        JAVA_BIG_DECIMAL_CONSTRUCTOR = java.math.BigDecimal.java_class.constructor(Java::long).method(:new_instance)
-
-        class ::Sequel::JDBC::Dataset::TYPE_TRANSLATOR
-          def oracle_decimal(v)
-            if v.scale == 0
-              i = v.long_value
-              if v.equals(JAVA_BIG_DECIMAL_CONSTRUCTOR.call(i))
-                i
-              else
-                decimal(v)
-              end
+        def type_convertor(map, meta, type, i)
+          case type
+          when NUMERIC_TYPE
+            if meta.getScale(i) == 0
+              map[:OracleDecimal]
             else
-              decimal(v)
+              super
             end
-          end
-        end
-
-        ORACLE_DECIMAL_METHOD = TYPE_TRANSLATOR_INSTANCE.method(:oracle_decimal)
-
-        def convert_type_oracle_timestamp(v)
-          db.to_application_timestamp(v.to_string)
-        end
-      
-        def convert_type_oracle_timestamptz(v)
-          convert_type_oracle_timestamp(db.synchronize(@opts[:server]){|c| v.timestampValue(c)})
-        end
-      
-        def convert_type_proc(v)
-          case v
-          when JAVA_BIG_DECIMAL
-            ORACLE_DECIMAL_METHOD
-          when Java::OracleSql::TIMESTAMPTZ
-            method(:convert_type_oracle_timestamptz)
-          when Java::OracleSql::TIMESTAMP
-            method(:convert_type_oracle_timestamp)
+          when *TIMESTAMPTZ_TYPES
+            map[TIMESTAMP_TYPE]
+          when CLOB_TYPE 
+            map[:OracleClob]
           else
             super
           end

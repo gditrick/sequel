@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # This adds a <tt>Sequel::Dataset#to_dot</tt> method.  The +to_dot+ method
 # returns a string that can be processed by graphviz's +dot+ program in
 # order to get a visualization of the dataset.  Basically, it shows a version
@@ -6,7 +8,10 @@
 # To load the extension:
 #
 #   Sequel.extension :to_dot
+#
+# Related module: Sequel::ToDot
 
+#
 module Sequel
   class ToDot
     module DatasetMethods
@@ -48,7 +53,13 @@ module Sequel
     # is given, it is used directly as the node or transition.  Otherwise
     # a node is created for the current object.
     def dot(label, j=nil)
-      @dot << "#{j||@i} [label=#{label.to_s.inspect}];"
+      label = case label
+      when nil
+        "<nil>"
+      else
+        label.to_s
+      end
+      @dot << "#{j||@i} [label=#{label.inspect}];"
     end
 
     # Recursive method that parses all of Sequel's internal datastructures,
@@ -56,11 +67,11 @@ module Sequel
     # structure.
     def v(e, l)
       @i += 1
-      dot(l, "#{@stack.last} -> #{@i}") if l
+      dot(l, "#{@stack.last} -> #{@i}")
       @stack.push(@i)
       case e
       when LiteralString
-        dot "#{e.inspect}.lit" # core_sql use
+        dot "Sequel.lit(#{e.to_s.inspect})"
       when Symbol, Numeric, String, Class, TrueClass, FalseClass, NilClass
         dot e.inspect
       when Array
@@ -91,7 +102,8 @@ module Sequel
       when SQL::AliasedExpression
         dot "AliasedExpression"
         v(e.expression, :expression)
-        v(e.aliaz, :alias)
+        v(e.alias, :alias)
+        v(e.columns, :columns) if e.columns
       when SQL::CaseExpression
         dot "CaseExpression"
         v(e.expression, :expression) if e.expression
@@ -102,18 +114,16 @@ module Sequel
         v(e.expr, :expr)
         v(e.type, :type)
       when SQL::Function
-        dot "Function: #{e.f}"
+        dot "Function: #{e.name}"
         e.args.each_with_index do |val, j|
           v(val, j)
         end
+        v(e.args, :args)
+        v(e.opts, :opts)
       when SQL::Subscript 
         dot "Subscript"
         v(e.f, :f)
         v(e.sub, :sub)
-      when SQL::WindowFunction
-        dot "WindowFunction"
-        v(e.function, :function)
-        v(e.window, :window)
       when SQL::Window
         dot "Window"
         v(e.opts, :opts)
@@ -123,15 +133,14 @@ module Sequel
         dot "PlaceholderLiteralString: #{str.inspect}"
         v(e.args, :args)
       when SQL::JoinClause
-        str = "#{e.join_type.to_s.upcase} JOIN"
+        str = "#{e.join_type.to_s.upcase} JOIN".dup
         if e.is_a?(SQL::JoinOnClause)
           str << " ON"
         elsif e.is_a?(SQL::JoinUsingClause)
           str << " USING"
         end
         dot str
-        v(e.table, :table)
-        v(e.table_alias, :alias) if e.table_alias
+        v(e.table_expr, :table)
         if e.is_a?(SQL::JoinOnClause)
           v(e.on, :on) 
         elsif e.is_a?(SQL::JoinUsingClause)
@@ -141,7 +150,7 @@ module Sequel
         dot "Dataset"
         TO_DOT_OPTIONS.each do |k|
           if val = e.opts[k]
-            v(val, k.to_s) 
+            v(val, k) 
           end
         end
       else

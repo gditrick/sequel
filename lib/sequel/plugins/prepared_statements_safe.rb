@@ -1,9 +1,12 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
     # The prepared_statements_safe plugin modifies the model to reduce the number of
     # prepared statements that can be created, by setting as many columns as possible
     # before creating, and by changing +save_changes+ to save all columns instead of
-    # just the changed ones.
+    # just the changed ones. This plugin exists for backwards compatibility
+    # and is not recommended for general use.
     #
     # This plugin depends on the +prepared_statements+ plugin.
     # 
@@ -26,7 +29,7 @@ module Sequel
       end
 
       module ClassMethods
-        # A hash with column symbol keys and default values.  Instance's
+        # A hash with column symbol keys and default values.  Instance
         # values are merged into this hash before creating to reduce the
         # number of free columns (columns that may or may not be present
         # in the INSERT statement), as the number of prepared statements
@@ -35,6 +38,13 @@ module Sequel
         
         Plugins.inherited_instance_variables(self, :@prepared_statements_column_defaults=>:dup)
         Plugins.after_set_dataset(self, :set_prepared_statements_column_defaults)
+
+        # Freeze the prepared statements column defaults when freezing the model class.
+        def freeze
+          @prepared_statements_column_defaults.freeze if @prepared_statements_column_defaults
+
+          super
+        end
 
         private
 
@@ -45,7 +55,8 @@ module Sequel
           if db_schema
             h = {}
             db_schema.each do |k, v|
-              h[k] = v[:ruby_default] if (v[:ruby_default] || !v[:default]) && !v[:primary_key]
+              default = v[:ruby_default]
+              h[k] = default if (default || !v[:default]) && !v[:primary_key] && !default.is_a?(Sequel::SQL::Expression)
             end
             @prepared_statements_column_defaults = h
           end
@@ -56,9 +67,7 @@ module Sequel
         # Merge the current values into the default values to reduce the number
         # of free columns.
         def before_create
-          if v = model.prepared_statements_column_defaults
-            @values = v.merge(values)
-          end
+          @values = model.prepared_statements_column_defaults.merge(@values)
           super
         end
 

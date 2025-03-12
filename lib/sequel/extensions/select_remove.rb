@@ -1,4 +1,6 @@
-# The select_remove extension adds Sequel::Dataset#select_remove for removing existing selected
+# frozen-string-literal: true
+#
+# The select_remove extension adds select_remove for removing existing selected
 # columns from a dataset.  It's not part of Sequel core as it is rarely needed and has
 # some corner cases where it can't work correctly.
 #
@@ -11,7 +13,10 @@
 # is probably the desired behavior if you are using this extension:
 #
 #   DB.extension(:select_remove)
+#
+# Related module: Sequel::SelectRemove
 
+#
 module Sequel
   module SelectRemove
     # Remove columns from the list of selected columns.  If any of the currently selected
@@ -21,8 +26,8 @@ module Sequel
     #   # Assume columns a, b, and c in items table
     #   DB[:items] # SELECT * FROM items
     #   DB[:items].select_remove(:c) # SELECT a, b FROM items
-    #   DB[:items].select(:a, :b___c, :c___b).select_remove(:c) # SELECT a, c AS b FROM items
-    #   DB[:items].select(:a, :b___c, :c___b).select_remove(:c___b) # SELECT a, b AS c FROM items
+    #   DB[:items].select(:a, Sequel[:b].as(:c), Sequel[:c].as(:b)).select_remove(:c) # SELECT a, c AS b FROM items
+    #   DB[:items].select(:a, Sequel[:b][:c], Sequel[:c][:b]).select_remove(Sequel[:c][:b]) # SELECT a, b AS c FROM items
     #
     # Note that there are a few cases where this method may not work correctly:
     #
@@ -30,7 +35,7 @@ module Sequel
     #   In this case, the code will currently use unqualified column names for all columns
     #   the dataset returns, except for the columns given.
     # * This dataset has an existing explicit selection containing an item that returns
-    #   multiple database columns (e.g. Sequel.expr(:table).*, Sequel.lit('column1, column2')).  In this case,
+    #   multiple database columns (e.g. Sequel[:table].*, Sequel.lit('column1, column2')).  In this case,
     #   the behavior is undefined and this method should not be used.
     #
     # There may be other cases where this method does not work correctly, use it with caution.

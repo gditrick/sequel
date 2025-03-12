@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
     # Sequel's built-in caching plugin supports caching to any object that
@@ -7,8 +9,8 @@ module Sequel
     #    cache_store.set(key, obj, time) # Associate the obj with the given key
     #                                    # in the cache for the time (specified
     #                                    # in seconds).
-    #    cache_store.get(key) => obj     # Returns object set with same key.
-    #    cache_store.get(key2) => nil    # nil returned if there isn't an object
+    #    cache_store.get(key) # => obj   # Returns object set with same key.
+    #    cache_store.get(key2) # => nil  # nil returned if there isn't an object
     #                                    # currently in the cache with that key.
     #    cache_store.delete(key)         # Remove key from cache
     #
@@ -17,8 +19,16 @@ module Sequel
     # raise an exception for a missing record, so if you use memcached, you will
     # want to use this option.
     #
-    # Note that only Model.[] method calls with a primary key argument are cached
-    # using this plugin.
+    # Note that only lookups by primary key are cached using this plugin.  The following
+    # methods use a lookup by primary key:
+    #
+    # * Model.with_pk
+    # * Model.with_pk!
+    # * Model.[] # when argument is not hash or nil
+    # * many_to_one association method # without dynamic callback, when primary key matches
+    #
+    # You should not use this plugin if you are using sharding and there are different
+    # rows for the same primary key on different shards.
     # 
     # Usage:
     #
@@ -27,15 +37,15 @@ module Sequel
     #   Sequel::Model.plugin :caching, CACHE
     #
     #   # Make the Album class use the cache with a 30 minute time-to-live
-    #   Album.plugin :caching, CACHE, :ttl=>1800
+    #   Album.plugin :caching, CACHE, ttl: 1800
     #
     #   # Make the Artist class use a cache with the memcached protocol
-    #   Artist.plugin :caching, MEMCACHED_CACHE, :ignore_exceptions=>true
+    #   Artist.plugin :caching, MEMCACHED_CACHE, ignore_exceptions: true
     module Caching
       # Set the cache_store and cache_ttl attributes for the given model.
       # If the :ttl option is not given, 3600 seconds is the default.
       def self.configure(model, store, opts=OPTS)
-        model.instance_eval do
+        model.instance_exec do
           @cache_store = store
           @cache_ttl = opts[:ttl] || 3600
           @cache_ignore_exceptions = opts[:ignore_exceptions]
@@ -64,10 +74,15 @@ module Sequel
           cache_get(cache_key(pk))
         end
 
+        # Returns the prefix used to namespace this class in the cache.
+        def cache_key_prefix
+          to_s
+        end
+
         # Return a key string for the given primary key.
         def cache_key(pk)
           raise(Error, 'no primary key for this record') unless pk.is_a?(Array) ? pk.all? : pk
-          "#{self}:#{Array(pk).join(',')}"
+          "#{cache_key_prefix}:#{Array(pk).join(',')}"
         end
         
         Plugins.inherited_instance_variables(self, :@cache_store=>nil, :@cache_ttl=>nil, :@cache_ignore_exceptions=>nil)
@@ -79,26 +94,27 @@ module Sequel
         
         private
     
+        # Access the cache using the given method and key, rescuing exceptions if necessary.
+        def cache_op(meth, ck)
+          if @cache_ignore_exceptions
+            @cache_store.public_send(meth, ck) rescue nil
+          else
+            @cache_store.public_send(meth, ck)
+          end
+        end
+    
         # Delete the entry with the matching key from the cache
         def cache_delete(ck)
-          if @cache_ignore_exceptions
-            @cache_store.delete(ck) rescue nil
-          else
-            @cache_store.delete(ck)
-          end
+          cache_op(:delete, ck)
           nil
         end
         
         # Returned the cached object, or nil if the object was not
         # in the cached
         def cache_get(ck)
-          if @cache_ignore_exceptions
-            @cache_store.get(ck) rescue nil
-          else
-            @cache_store.get(ck)
-          end
+          cache_op(:get, ck)
         end
-    
+
         # Set the object in the cache_store with the given key for cache_ttl seconds.
         def cache_set(ck, obj)
           @cache_store.set(ck, obj, @cache_ttl)

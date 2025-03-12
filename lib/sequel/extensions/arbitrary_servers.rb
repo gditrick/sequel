@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The arbitrary_servers extension allows you to connect to arbitrary
 # servers/shards that were not defined when you created the database.
 # To use it, you first load the extension into the Database object:
@@ -7,34 +9,34 @@
 # Then you can pass arbitrary connection options for the server/shard
 # to use as a hash:
 #
-#   DB[:table].server(:host=>'...', :database=>'...').all
+#   DB[:table].server(host: '...', database: '...').all
 #
 # Because Sequel can never be sure that the connection will be reused,
 # arbitrary connections are disconnected as soon as the outermost block
 # that uses them exits.  So this example uses the same connection:
 #
-#   DB.transaction(:server=>{:host=>'...', :database=>'...'}) do |c|
-#     DB.transaction(:server=>{:host=>'...', :database=>'...'}) do |c2|
+#   DB.transaction(server: {host: '...', database: '...'}) do |c|
+#     DB.transaction(server: {host: '...', database: '...'}) do |c2|
 #       # c == c2
 #     end
 #   end
 #
 # But this example does not:
 #
-#   DB.transaction(:server=>{:host=>'...', :database=>'...'}) do |c|
+#   DB.transaction(server: {host: '...', database: '...'}) do |c|
 #   end
-#   DB.transaction(:server=>{:host=>'...', :database=>'...'}) do |c2|
+#   DB.transaction(server: {host: '...', database: '...'}) do |c2|
 #     # c != c2
 #   end
 #
 # You can use this extension in conjunction with the server_block
 # extension:
 #
-#   DB.with_server(:host=>'...', :database=>'...') do
+#   DB.with_server(host: '...', database: '...') do
 #     DB.synchronize do
 #       # All of these use the host/database given to with_server
-#       DB[:table].insert(...)
-#       DB[:table].update(...)
+#       DB[:table].insert(c: 1)
+#       DB[:table].update(c: 2)
 #       DB.tables
 #       DB[:table].all
 #     end
@@ -44,15 +46,18 @@
 # extension may want to do the following to so that you don't need
 # to call synchronize separately:
 #
-#   def DB.with_server(*)
-#     super{synchronize{yield}}
+#   def DB.with_server(*a)
+#     super(*a){synchronize{yield}}
 #   end
 #
 # Note that this extension only works with the sharded threaded connection
 # pool.  If you are using the sharded single connection pool, you need
 # to switch to the sharded threaded connection pool before using this
 # extension.
+#
+# Related module: Sequel::ArbitraryServers
 
+#
 module Sequel
   module ArbitraryServers
     private
@@ -97,7 +102,7 @@ module Sequel
         a = @allocated[thread]
         a.delete(server)
         @allocated.delete(thread) if a.empty?
-        db.disconnect_connection(conn)
+        disconnect_connection(conn)
       else  
         super
       end

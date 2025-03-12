@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
     # The composition plugin allows you to easily define a virtual
@@ -10,7 +12,7 @@ module Sequel
     # This can be handled with:
     #
     #   Album.plugin :composition
-    #   Album.composition :date, :mapping=>[:year, :month, :day]
+    #   Album.composition :date, mapping: [:year, :month, :day]
     #
     # With the :mapping option, you can provide a :class option
     # that gives the class to use, but if that is not provided, it
@@ -30,14 +32,15 @@ module Sequel
     #
     # The :mapping option is just a shortcut that works in particular
     # cases.  To handle any case, you can define a custom :composer
-    # and :decomposer procs.  The :composer proc will be instance_evaled
-    # the first time the getter is called, and the :decomposer proc
-    # will be instance_evaled before saving.  The above example could
+    # and :decomposer procs.  The :composer and :decomposer procs will
+    # be used to define instance methods.  The :composer will be called
+    # the first time the getter is called, and the :decomposer 
+    # will be called before saving.  The above example could
     # also be implemented as:
     #
     #   Album.composition :date,
-    #     :composer=>proc{Date.new(year, month, day) if year || month || day},
-    #     :decomposer=>(proc do
+    #     composer: proc{Date.new(year, month, day) if year || month || day},
+    #     decomposer: (proc do
     #       if d = compositions[:date]
     #         self.year = d.year
     #         self.month = d.month
@@ -56,7 +59,10 @@ module Sequel
     module Composition
       # Define the necessary class instance variables.
       def self.apply(model)
-        model.instance_eval{@compositions = {}}
+        model.instance_exec do
+          @compositions = {}
+          include(@composition_module ||= Sequel.set_temp_name(Module.new){"#{name}::@composition_module"})
+        end
       end
 
       module ClassMethods
@@ -64,32 +70,28 @@ module Sequel
         # hash values.
         attr_reader :compositions
         
-        # A module included in the class holding the composition
-        # getter and setter methods.
-        attr_reader :composition_module
-        
         # Define a composition for this model, with name being the name of the composition.
         # You must provide either a :mapping option or both the :composer and :decomposer options. 
         #
         # Options:
-        # * :class - if using the :mapping option, the class to use, as a Class, String or Symbol.
-        # * :composer - A proc that is instance evaled when the composition getter method is called
-        #   to create the composition.
-        # * :decomposer - A proc that is instance evaled before saving the model object,
-        #   if the composition object exists, which sets the columns in the model object
-        #   based on the value of the composition object.
-        # * :mapping - An array where each element is either a symbol or an array of two symbols.
-        #   A symbol is treated like an array of two symbols where both symbols are the same.
-        #   The first symbol represents the getter method in the model, and the second symbol
-        #   represents the getter method in the composition object. Example:
-        #     # Uses columns year, month, and day in the current model
-        #     # Uses year, month, and day methods in the composition object
-        #     :mapping=>[:year, :month, :day]
-        #     # Uses columns year, month, and day in the current model
-        #     # Uses y, m, and d methods in the composition object where
-        #     # for example y in the composition object represents year
-        #     # in the model object.
-        #     :mapping=>[[:year, :y], [:month, :m], [:day, :d]]
+        # :class :: if using the :mapping option, the class to use, as a Class, String or Symbol.
+        # :composer :: A proc used to define the method that the composition getter method will call 
+        #              to create the composition.
+        # :decomposer :: A proc used to define the method called before saving the model object,
+        #                if the composition object exists, which sets the columns in the model object
+        #                based on the value of the composition object.
+        # :mapping :: An array where each element is either a symbol or an array of two symbols.
+        #             A symbol is treated like an array of two symbols where both symbols are the same.
+        #             The first symbol represents the getter method in the model, and the second symbol
+        #             represents the getter method in the composition object. Example:
+        #                 # Uses columns year, month, and day in the current model
+        #                 # Uses year, month, and day methods in the composition object
+        #                 {mapping: [:year, :month, :day]}
+        #                 # Uses columns year, month, and day in the current model
+        #                 # Uses y, m, and d methods in the composition object where
+        #                 # for example y in the composition object represents year
+        #                 # in the model object.
+        #                 {mapping: [[:year, :y], [:month, :m], [:day, :d]]}
         def composition(name, opts=OPTS)
           opts = opts.dup
           compositions[name] = opts
@@ -100,7 +102,7 @@ module Sequel
               klass = opts[:class]
               class_proc = proc{klass || constantize(opts[:class_name])}
               opts[:composer] = proc do
-                if values = keys.map{|k| send(k)} and values.any?{|v| !v.nil?}
+                if values = keys.map{|k| get_column_value(k)} and values.any?{|v| !v.nil?}
                   class_proc.call.new(*values)
                 else
                   nil
@@ -113,9 +115,9 @@ module Sequel
               setters = setter_meths.zip(cov_methods)
               opts[:decomposer] = proc do
                 if (o = compositions[name]).nil?
-                  setter_meths.each{|sm| send(sm, nil)}
+                  setter_meths.each{|sm| set_column_value(sm, nil)}
                 else
-                  setters.each{|sm, cm| send(sm, o.send(cm))}
+                  setters.each{|sm, cm| set_column_value(sm, o.public_send(cm))}
                 end
               end
             end
@@ -128,60 +130,74 @@ module Sequel
         
         # Define getter and setter methods for the composition object.
         def define_composition_accessor(name, opts=OPTS)
-          include(@composition_module ||= Module.new) unless composition_module
-          composer = opts[:composer]
-          composition_module.class_eval do
+          composer_meth = opts[:composer_method] = Plugins.def_sequel_method(@composition_module, "#{name}_composer", 0, &opts[:composer])
+          opts[:decomposer_method] = Plugins.def_sequel_method(@composition_module, "#{name}_decomposer", 0, &opts[:decomposer])
+          @composition_module.class_eval do
             define_method(name) do 
               if compositions.has_key?(name)
                 compositions[name]
               elsif frozen?
-                instance_eval(&composer)
+                # composer_meth is private
+                send(composer_meth)
               else
-                compositions[name] = instance_eval(&composer)
+                compositions[name] = send(composer_meth)
               end
             end
-            define_method("#{name}=") do |v|
+            alias_method(name, name)
+
+            meth = :"#{name}="
+            define_method(meth) do |v|
               modified!
               compositions[name] = v
             end
+            alias_method(meth, meth)
           end
+        end
+
+        # Freeze composition information when freezing model class.
+        def freeze
+          compositions.freeze.each_value(&:freeze)
+          @composition_module.freeze
+
+          super
         end
       end
 
       module InstanceMethods
-        # For each composition, set the columns in the model class based
-        # on the composition object.
-        def before_save
-          @compositions.keys.each{|n| instance_eval(&model.compositions[n][:decomposer])} if @compositions
-          super
-        end
-        
         # Cache of composition objects for this class.
         def compositions
           @compositions ||= {}
         end
 
-        # Duplicate compositions hash when duplicating model instance.
-        def dup
-          s = self
-          super.instance_eval do
-            @compositions = s.compositions.dup
-            self
-          end
-        end
-
         # Freeze compositions hash when freezing model instance.
         def freeze
-          compositions.freeze
+          compositions
           super
+          compositions.freeze
+          self
         end
 
+        # For each composition, set the columns in the model class based
+        # on the composition object.
+        def before_validation
+          # decomposer_method is private
+          @compositions.keys.each{|n| send(model.compositions[n][:decomposer_method])} if @compositions
+          super
+        end
+        
         private
 
         # Clear the cached compositions when manually refreshing.
         def _refresh_set_values(hash)
           @compositions.clear if @compositions
           super
+        end
+
+        # Duplicate compositions hash when duplicating model instance.
+        def initialize_copy(other)
+          super
+          @compositions = Hash[other.compositions]
+          self
         end
       end
     end

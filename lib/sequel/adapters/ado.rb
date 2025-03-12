@@ -1,12 +1,94 @@
+# frozen-string-literal: true
+
 require 'win32ole'
 
 module Sequel
   # The ADO adapter provides connectivity to ADO databases in Windows.
   module ADO
-    class Database < Sequel::Database
-      DISCONNECT_ERROR_RE = /Communication link failure/
+    # ADO constants (DataTypeEnum)
+    # Source: https://msdn.microsoft.com/en-us/library/ms675318(v=vs.85).aspx
+    AdBigInt           = 20
+    AdBinary           = 128
+    #AdBoolean          = 11
+    #AdBSTR             = 8
+    #AdChapter          = 136
+    #AdChar             = 129
+    #AdCurrency         = 6
+    #AdDate             = 7
+    AdDBDate           = 133
+    #AdDBTime           = 134
+    AdDBTimeStamp      = 135
+    #AdDecimal          = 14
+    #AdDouble           = 5
+    #AdEmpty            = 0
+    #AdError            = 10
+    #AdFileTime         = 64
+    #AdGUID             = 72
+    #AdIDispatch        = 9
+    #AdInteger          = 3
+    #AdIUnknown         = 13
+    AdLongVarBinary    = 205
+    #AdLongVarChar      = 201
+    #AdLongVarWChar     = 203
+    AdNumeric          = 131
+    #AdPropVariant      = 138
+    #AdSingle           = 4
+    #AdSmallInt         = 2
+    #AdTinyInt          = 16
+    #AdUnsignedBigInt   = 21
+    #AdUnsignedInt      = 19
+    #AdUnsignedSmallInt = 18
+    #AdUnsignedTinyInt  = 17
+    #AdUserDefined      = 132
+    AdVarBinary        = 204
+    #AdVarChar          = 200
+    #AdVariant          = 12
+    AdVarNumeric       = 139
+    #AdVarWChar         = 202
+    #AdWChar            = 130
 
+    bigint = Object.new
+    def bigint.call(v)
+      v.to_i
+    end
+
+    numeric = Object.new
+    def numeric.call(v)
+      if v.include?(',')
+        BigDecimal(v.tr(',', '.'))
+      else
+        BigDecimal(v)
+      end
+    end
+
+    binary = Object.new
+    def binary.call(v)
+      Sequel.blob(v.pack('c*'))
+    end
+
+    date = Object.new
+    def date.call(v)
+      Date.new(v.year, v.month, v.day)
+    end
+
+    CONVERSION_PROCS = {}
+    [
+      [bigint, AdBigInt],
+      [numeric, AdNumeric, AdVarNumeric],
+      [date, AdDBDate],
+      [binary, AdBinary, AdVarBinary, AdLongVarBinary]
+    ].each do |callable, *types|
+      callable.freeze
+      types.each do |i|
+        CONVERSION_PROCS[i] = callable
+      end
+    end
+    CONVERSION_PROCS.freeze
+
+    class Database < Sequel::Database
       set_adapter_scheme :ado
+
+      attr_reader :conversion_procs
 
       # In addition to the usual database options,
       # the following options have an effect:
@@ -14,7 +96,6 @@ module Sequel
       # :command_timeout :: Sets the time in seconds to wait while attempting
       #                     to execute a command before cancelling the attempt and generating
       #                     an error. Specifically, it sets the ADO CommandTimeout property.
-      #                     If this property is not set, the default of 30 seconds is used.
       # :driver :: The driver to use in the ADO connection string.  If not provided, a default
       #            of "SQL Server" is used.
       # :conn_string :: The full ADO connection string.  If this is provided,
@@ -26,8 +107,8 @@ module Sequel
       #
       # Pay special attention to the :provider option, as without specifying a provider,
       # many things will be broken.  The SQLNCLI10 provider appears to work well if you
-      # are connecting to Microsoft SQL Server, but it is not the default as that would
-      # break backwards compatability.
+      # are connecting to Microsoft SQL Server, but it is not the default as that is not
+      # always available and would break backwards compatability.
       def connect(server)
         opts = server_opts(server)
         s = opts[:conn_string] || "driver=#{opts[:driver]};server=#{opts[:host]};database=#{opts[:database]}#{";uid=#{opts[:user]};pwd=#{opts[:password]}" if opts[:user]}"
@@ -42,6 +123,11 @@ module Sequel
         conn.Close
       rescue WIN32OLERuntimeError
         nil
+      end
+
+      def freeze
+        @conversion_procs.freeze
+        super
       end
 
       # Just execute so it doesn't attempt to return the number of rows modified.
@@ -62,7 +148,7 @@ module Sequel
         return super if opts[:provider]
         synchronize(opts[:server]) do |conn|
           begin
-            log_yield(sql){conn.Execute(sql, 1)}
+            log_connection_yield(sql, conn){conn.Execute(sql, 1)}
             WIN32OLE::ARGV[1]
           rescue ::WIN32OLERuntimeError => e
             raise_error(e)
@@ -73,8 +159,15 @@ module Sequel
       def execute(sql, opts=OPTS)
         synchronize(opts[:server]) do |conn|
           begin
-            r = log_yield(sql){conn.Execute(sql)}
-            yield(r) if block_given?
+            r = log_connection_yield(sql, conn){conn.Execute(sql)}
+            begin
+              yield r if defined?(yield)
+            ensure
+              begin
+                r.close
+              rescue ::WIN32OLERuntimeError
+              end
+            end
           rescue ::WIN32OLERuntimeError => e
             raise_error(e)
           end
@@ -87,20 +180,42 @@ module Sequel
       def adapter_initialize
         case @opts[:conn_string]
         when /Microsoft\.(Jet|ACE)\.OLEDB/io
-          Sequel.require 'adapters/ado/access'
+          require_relative 'ado/access'
           extend Sequel::ADO::Access::DatabaseMethods
           self.dataset_class = ADO::Access::Dataset
         else
           @opts[:driver] ||= 'SQL Server'
           case @opts[:driver]
           when 'SQL Server'
-            Sequel.require 'adapters/ado/mssql'
+            require_relative 'ado/mssql'
             extend Sequel::ADO::MSSQL::DatabaseMethods
             self.dataset_class = ADO::MSSQL::Dataset
             set_mssql_unicode_strings
           end
         end
+
+        @conversion_procs = CONVERSION_PROCS.dup
+        @conversion_procs[AdDBTimeStamp] = method(:adb_timestamp_to_application_timestamp)
+
         super
+      end
+
+      def adb_timestamp_to_application_timestamp(v)
+        # This hard codes a timestamp_precision of 6 when converting.
+        # That is the default timestamp_precision, but the ado/mssql adapter uses a timestamp_precision
+        # of 3.  However, timestamps returned by ado/mssql have nsec values that end up rounding to a
+        # the same value as if a timestamp_precision of 3 was hard coded (either xxx999yzz, where y is
+        # 5-9 or xxx000yzz where y is 0-4).
+        #
+        # ADO subadapters should override this they would like a different timestamp precision and the
+        # this code does not work for them (for example, if they provide full nsec precision).
+        #
+        # Note that fractional second handling for WIN32OLE objects is not correct on ruby <2.2
+        to_application_timestamp([v.year, v.month, v.day, v.hour, v.min, v.sec, (v.nsec/1000.0).round * 1000])
+      end
+
+      def dataset_class_default
+        Dataset
       end
 
       # The ADO adapter's default provider doesn't support transactions, since it 
@@ -119,7 +234,7 @@ module Sequel
       end
 
       def disconnect_error?(e, opts)
-        super || (e.is_a?(::WIN32OLERuntimeError) && e.message =~ DISCONNECT_ERROR_RE)
+        super || (e.is_a?(::WIN32OLERuntimeError) && e.message =~ /Communication link failure/)
       end
 
       def rollback_transaction(conn, opts=OPTS)
@@ -128,21 +243,38 @@ module Sequel
     end
     
     class Dataset < Sequel::Dataset
-      Database::DatasetClass = self
-
       def fetch_rows(sql)
-        execute(sql) do |s|
-          columns = cols = s.Fields.extend(Enumerable).map{|column| output_identifier(column.Name)}
-          @columns = columns
-          s.getRows.transpose.each do |r|
-            row = {}
-            cols.each{|c| row[c] = r.shift}
-            yield row
-          end unless s.eof
+        execute(sql) do |recordset|
+          cols = []
+          conversion_procs = db.conversion_procs
+
+          recordset.Fields.each do |field|
+            cols << [output_identifier(field.Name), conversion_procs[field.Type]]
+          end
+
+          self.columns = cols.map(&:first)
+          return if recordset.EOF
+          max = cols.length
+
+          recordset.GetRows.transpose.each do |field_values|
+            h = {}
+
+            i = -1
+            while (i += 1) < max
+              name, cp = cols[i]
+              h[name] = if (v = field_values[i]) && cp
+                cp.call(v)
+              else
+                v
+              end
+            end
+            
+            yield h
+          end
         end
       end
       
-      # ADO returns nil for all for delete and update statements.
+      # ADO can return for for delete and update statements, depending on the provider.
       def provides_accurate_rows_matched?
         false
       end

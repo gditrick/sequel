@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The pg_array_ops extension adds support to Sequel's DSL to make
 # it easier to call PostgreSQL array functions and operators.
 #
@@ -17,10 +19,10 @@
 # Also, on most Sequel expression objects, you can call the pg_array
 # method:
 #
-#   ia = Sequel.expr(:int_array_column).pg_array
+#   ia = Sequel[:int_array_column].pg_array
 #
-# If you have loaded the {core_extensions extension}[link:files/doc/core_extensions_rdoc.html]),
-# or you have loaded the {core_refinements extension}[link:files/doc/core_refinements_rdoc.html])
+# If you have loaded the {core_extensions extension}[rdoc-ref:doc/core_extensions.rdoc],
+# or you have loaded the core_refinements extension
 # and have activated refinements for the file, you can also use Symbol#pg_array:
 #
 #   ia = :int_array_column.pg_array
@@ -41,15 +43,19 @@
 #
 #   ia.any             # ANY(int_array_column)
 #   ia.all             # ALL(int_array_column)
+#   ia.cardinality     # cardinality(int_array_column)
 #   ia.dims            # array_dims(int_array_column)
+#   ia.hstore          # hstore(int_array_column)
+#   ia.hstore(:a)      # hstore(int_array_column, a)
 #   ia.length          # array_length(int_array_column, 1)
 #   ia.length(2)       # array_length(int_array_column, 2)
 #   ia.lower           # array_lower(int_array_column, 1)
 #   ia.lower(2)        # array_lower(int_array_column, 2)
-#   ia.join            # array_to_string(int_array_column, '', NULL)
-#   ia.join(':')       # array_to_string(int_array_column, ':', NULL)
+#   ia.join            # array_to_string(int_array_column, '')
+#   ia.join(':')       # array_to_string(int_array_column, ':')
 #   ia.join(':', ' ')  # array_to_string(int_array_column, ':', ' ')
 #   ia.unnest          # unnest(int_array_column)
+#   ia.unnest(:b)      # unnest(int_array_column, b)
 # 
 # See the PostgreSQL array function and operator documentation for more
 # details on what these functions and operators do.
@@ -57,6 +63,13 @@
 # If you are also using the pg_array extension, you should load it before
 # loading this extension.  Doing so will allow you to use PGArray#op to get
 # an ArrayOp, allowing you to perform array operations on array literals.
+#
+# In order for #hstore to automatically wrap the returned value correctly in
+# an HStoreOp, you need to load the pg_hstore_ops extension.
+#
+# Related module: Sequel::Postgres::ArrayOp
+
+#
 module Sequel
   module Postgres
     # The ArrayOp class is a simple container for a single object that
@@ -95,7 +108,7 @@ module Sequel
 
       # Call the ANY function:
       #
-      #   array_op.all # ANY(array)
+      #   array_op.any # ANY(array)
       #
       # Usually used like:
       #
@@ -103,6 +116,13 @@ module Sequel
       #   # WHERE (1 = ANY(array))
       def any
         function(:ANY)
+      end
+
+      # Call the cardinality method:
+      #
+      #   array_op.cardinality # cardinality(array)
+      def cardinality
+        function(:cardinality)
       end
 
       # Use the contains (@>) operator:
@@ -137,7 +157,9 @@ module Sequel
         else
           Sequel.function(:hstore, self, wrap_array(arg))
         end
+        # :nocov:
         if Sequel.respond_to?(:hstore_op)
+        # :nocov:
           v = Sequel.hstore_op(v)
         end
         v
@@ -197,20 +219,24 @@ module Sequel
 
       # Call the array_to_string method:
       #
-      #   array_op.join           # array_to_string(array, '', NULL)
-      #   array_op.to_string      # array_to_string(array, '', NULL)
-      #   array_op.join(":")      # array_to_string(array, ':', NULL)
+      #   array_op.join           # array_to_string(array, '')
+      #   array_op.to_string      # array_to_string(array, '')
+      #   array_op.join(":")      # array_to_string(array, ':')
       #   array_op.join(":", "*") # array_to_string(array, ':', '*')
       def to_string(joiner="", null=nil)
-        function(:array_to_string, joiner, null)
+        if null.nil?
+          function(:array_to_string, joiner)
+        else
+          function(:array_to_string, joiner, null)
+        end
       end
       alias join to_string
       
       # Call the unnest method:
       #
       #   array_op.unnest # unnest(array)
-      def unnest
-        function(:unnest)
+      def unnest(*args)
+        function(:unnest, *args.map{|a| wrap_array(a)})
       end
       
       # Use the concatentation (||) operator, reversing the order:
@@ -259,7 +285,9 @@ module Sequel
       end
     end
 
+    # :nocov:
     if defined?(PGArray)
+    # :nocov:
       class PGArray
         # Wrap the PGArray instance in an ArrayOp, allowing you to easily use
         # the PostgreSQL array functions and operators with literal arrays.
@@ -301,7 +329,7 @@ end
 if defined?(Sequel::CoreRefinements)
   module Sequel::CoreRefinements
     refine Symbol do
-      include Sequel::Postgres::ArrayOpMethods
+      send INCLUDE_METH, Sequel::Postgres::ArrayOpMethods
     end
   end
 end

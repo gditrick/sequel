@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   extension :pg_array, :pg_array_ops
 
@@ -47,11 +49,11 @@ module Sequel
     #
     # They support some additional options specific to this plugin:
     #
-    # :array_type :: This allows you to specify the type of the array.  This
-    #                is only necessary to set in very narrow circumstances,
-    #                such as when this plugin needs to create an array type,
-    #                and typecasting is turned off or not setup correctly
-    #                for the model object.
+    # :array_type :: This overrides the type of the array.  By default, the type
+    #                is determined by looking at the db_schema for the model, and if that fails,
+    #                it defaults to :integer.
+    # :raise_on_save_failure :: Do not raise exceptions for hook or validation failures when saving associated
+    #                           objects in the add/remove methods (return nil instead).
     # :save_after_modify :: For pg_array_to_many associations, this makes the
     #                       the modification methods save the current object,
     #                       so they operate more similarly to the one_to_many
@@ -67,10 +69,23 @@ module Sequel
     # This plugin should work on all supported PostgreSQL versions, except
     # the remove_all modification method for many_to_pg_array associations, which
     # requires the array_remove method added in PostgreSQL 9.3.
+    #
+    # This plugin requires that the underlying database have the pg_array
+    # extension loaded.
     module PgArrayAssociations
       # The AssociationReflection subclass for many_to_pg_array associations.
       class ManyToPgArrayAssociationReflection < Sequel::Model::Associations::AssociationReflection
-        Sequel::Model::Associations::ASSOCIATION_TYPES[:many_to_pg_array] = self
+        Sequel.synchronize{Sequel::Model::Associations::ASSOCIATION_TYPES[:many_to_pg_array] = self}
+
+        def array_type
+          cached_fetch(:array_type) do
+            if (sch = associated_class.db_schema) && (s = sch[self[:key]]) && (t = s[:db_type])
+              t.sub(/\[\]\z/, '').freeze
+            else
+              :integer
+            end
+          end
+        end
 
         # The array column in the associated model containing foreign keys to
         # the current model.
@@ -81,7 +96,7 @@ module Sequel
         # many_to_pg_array associations can have associated objects as long as they have
         # a primary key.
         def can_have_associated_objects?(obj)
-          obj.send(self[:primary_key])
+          obj.get_column_value(self[:primary_key])
         end
 
         # Assume that the key in the associated table uses a version of the current
@@ -90,6 +105,35 @@ module Sequel
           :"#{underscore(demodulize(self[:model].name))}_ids"
         end
         
+        # Always use the ruby eager_graph limit strategy if association is limited.
+        def eager_graph_limit_strategy(_)
+          :ruby if self[:limit]
+        end
+
+        # Always use the ruby eager limit strategy
+        def eager_limit_strategy
+          cached_fetch(:_eager_limit_strategy) do
+            :ruby if self[:limit]
+          end
+        end
+
+        # Don't use a filter by associations limit strategy
+        def filter_by_associations_limit_strategy
+          nil
+        end
+
+        FINALIZE_SETTINGS = superclass::FINALIZE_SETTINGS.merge(
+          :array_type=>:array_type
+        ).freeze
+        def finalize_settings
+          FINALIZE_SETTINGS
+        end
+
+        # Handle silent failure of add/remove methods if raise_on_save_failure is false.
+        def handle_silent_modification_failure?
+          self[:raise_on_save_failure] == false
+        end
+
         # The hash key to use for the eager loading predicate (left side of IN (1, 2, 3))
         def predicate_key
           cached_fetch(:predicate_key){qualify_assoc(self[:key_column])}
@@ -109,6 +153,20 @@ module Sequel
     
         private
     
+        # The predicate condition to use for the eager_loader.
+        def eager_loading_predicate_condition(keys)
+          Sequel.pg_array_op(predicate_key).overlaps(Sequel.pg_array(keys, array_type))
+        end
+
+        def filter_by_associations_add_conditions_dataset_filter(ds)
+          key = qualify(associated_class.table_name, self[:key])
+          ds.cross_join(Sequel.function(:unnest, key).as(:_smtopgaa_, [:_smtopgaa_key_])).exclude(key=>nil).select(:_smtopgaa_key_)
+        end
+        
+        def filter_by_associations_conditions_key
+          qualify(self[:model].table_name, primary_key)
+        end
+
         # Only consider an association as a reciprocal if it has matching keys
         # and primary keys.
         def reciprocal_association?(assoc_reflect)
@@ -118,11 +176,25 @@ module Sequel
         def reciprocal_type
           :pg_array_to_many
         end
+
+        def use_placeholder_loader?
+          false
+        end
       end
 
       # The AssociationReflection subclass for pg_array_to_many associations.
       class PgArrayToManyAssociationReflection < Sequel::Model::Associations::AssociationReflection
-        Sequel::Model::Associations::ASSOCIATION_TYPES[:pg_array_to_many] = self
+        Sequel.synchronize{Sequel::Model::Associations::ASSOCIATION_TYPES[:pg_array_to_many] = self}
+
+        def array_type
+          cached_fetch(:array_type) do
+            if (sch = self[:model].db_schema) && (s = sch[self[:key]]) && (t = s[:db_type])
+              t.sub(/\[\]\z/, '').freeze
+            else
+              :integer
+            end
+          end
+        end
 
         # An array containing the primary key for the associated model.
         def associated_object_keys
@@ -132,7 +204,7 @@ module Sequel
         # pg_array_to_many associations can only have associated objects if
         # the array field is not nil or empty.
         def can_have_associated_objects?(obj)
-          v = obj.send(self[:key])
+          v = obj.get_column_value(self[:key])
           v && !v.empty?
         end
 
@@ -147,6 +219,38 @@ module Sequel
           :"#{singularize(self[:name])}_ids"
         end
 
+        # Always use the ruby eager_graph limit strategy if association is limited.
+        def eager_graph_limit_strategy(_)
+          :ruby if self[:limit]
+        end
+
+        # Always use the ruby eager limit strategy
+        def eager_limit_strategy
+          cached_fetch(:_eager_limit_strategy) do
+            :ruby if self[:limit]
+          end
+        end
+
+        # Don't use a filter by associations limit strategy
+        def filter_by_associations_limit_strategy
+          nil
+        end
+
+        FINALIZE_SETTINGS = superclass::FINALIZE_SETTINGS.merge(
+          :array_type=>:array_type,
+          :primary_key=>:primary_key,
+          :primary_key_method=>:primary_key_method
+        ).freeze
+        def finalize_settings
+          FINALIZE_SETTINGS
+        end
+
+        # Handle silent failure of add/remove methods if raise_on_save_failure is false
+        # and save_after_modify is true.
+        def handle_silent_modification_failure?
+          self[:raise_on_save_failure] == false && self[:save_after_modify]
+        end
+
         # A qualified version of the associated primary key.
         def predicate_key
           cached_fetch(:predicate_key){qualify_assoc(primary_key)}
@@ -154,7 +258,7 @@ module Sequel
     
         # The primary key of the associated model.
         def primary_key
-          cached_fetch(:primary_key){associated_class.primary_key}
+          cached_fetch(:primary_key){associated_class.primary_key || raise(Error, "no primary key specified for #{associated_class.inspect}")}
         end
 
         # The method to call to get value of the primary key of the associated model.
@@ -162,8 +266,22 @@ module Sequel
           cached_fetch(:primary_key_method){primary_key}
         end
 
+        def filter_by_associations_conditions_expression(obj)
+          ds = filter_by_associations_conditions_dataset.where(filter_by_associations_conditions_subquery_conditions(obj))
+          Sequel.function(:coalesce, Sequel.pg_array(filter_by_associations_conditions_key).overlaps(ds), Sequel::SQL::Constants::FALSE)
+        end
+
         private
     
+        def filter_by_associations_add_conditions_dataset_filter(ds)
+          pk = qualify(associated_class.table_name, primary_key)
+          ds.select{array_agg(pk)}.exclude(pk=>nil)
+        end
+        
+        def filter_by_associations_conditions_key
+          qualify(self[:model].table_name, self[:key])
+        end
+
         # Only consider an association as a reciprocal if it has matching keys
         # and primary keys.
         def reciprocal_association?(assoc_reflect)
@@ -173,6 +291,15 @@ module Sequel
         def reciprocal_type
           :many_to_pg_array
         end
+
+        def use_placeholder_loader?
+          false
+        end
+      end
+
+      # Add the pg_array extension to the database
+      def self.apply(model)
+        model.db.extension(:pg_array)
       end
 
       module ClassMethods
@@ -197,35 +324,30 @@ module Sequel
           name = opts[:name]
           model = self
           pk = opts[:eager_loader_key] = opts[:primary_key] ||= model.primary_key
+          raise(Error, "no primary key specified for #{inspect}") unless pk
           opts[:key] = opts.default_key unless opts.has_key?(:key)
           key = opts[:key]
           key_column = opts[:key_column] ||= opts[:key]
-          opts[:after_load].unshift(:array_uniq!) if opts[:uniq]
-          slice_range = opts.slice_range
+          if opts[:uniq]
+            opts[:after_load] ||= []
+            opts[:after_load].unshift(:array_uniq!)
+          end
           opts[:dataset] ||= lambda do
-            opts.associated_dataset.where(Sequel.pg_array_op(opts.predicate_key).contains([send(pk)]))
+            opts.associated_dataset.where(Sequel.pg_array_op(opts.predicate_key).contains(Sequel.pg_array([get_column_value(pk)], opts.array_type)))
           end
           opts[:eager_loader] ||= proc do |eo|
             id_map = eo[:id_map]
-            rows = eo[:rows]
-            rows.each do |object|
-              object.associations[name] = []
-            end
+            eo = Hash[eo]
+            eo[:loader] = false
 
-            klass = opts.associated_class
-            ds = model.eager_loading_dataset(opts, klass.where(Sequel.pg_array_op(opts.predicate_key).overlaps(id_map.keys)), nil, eo[:associations], eo)
-            ds.all do |assoc_record|
-              if pks ||= assoc_record.send(key)
+            eager_load_results(opts, eo) do |assoc_record|
+              if pks = assoc_record.get_column_value(key)
                 pks.each do |pkv|
-                  next unless objects = id_map[pkv]
-                  objects.each do |object| 
+                  id_map[pkv].each do |object| 
                     object.associations[name].push(assoc_record)
                   end
                 end
               end
-            end
-            if slice_range
-              rows.each{|o| o.associations[name] = o.associations[name][slice_range] || []}
             end
           end
 
@@ -253,81 +375,81 @@ module Sequel
 
           opts[:eager_grapher] ||= proc do |eo|
             ds = eo[:self]
-            ds = ds.graph(eager_graph_dataset(opts, eo), conditions, eo.merge(:select=>select, :join_type=>join_type, :qualify=>:deep, :from_self_alias=>ds.opts[:eager_graph][:master]), &graph_block)
+            ds = ds.graph(eager_graph_dataset(opts, eo), conditions, eo.merge(:select=>select, :join_type=>eo[:join_type]||join_type, :qualify=>:deep), &graph_block)
             ds
           end
 
-          def_association_dataset_methods(opts)
+          return if opts[:read_only]
 
-          unless opts[:read_only]
-            validate = opts[:validate]
+          save_opts = {:validate=>opts[:validate]}
+          save_opts[:raise_on_failure] = opts[:raise_on_save_failure] != false
 
-            array_type = opts[:array_type] ||= :integer
-            adder = opts[:adder] || proc do |o|
-              if array = o.send(key)
-                array << send(pk)
+          unless opts.has_key?(:adder)
+            opts[:adder] = proc do |o|
+              if array = o.get_column_value(key)
+                array << get_column_value(pk)
               else
-                o.send("#{key}=", Sequel.pg_array([send(pk)], array_type))
+                o.set_column_value("#{key}=", Sequel.pg_array([get_column_value(pk)], opts.array_type))
               end
-              o.save(:validate=>validate) || raise(Sequel::Error, "invalid associated object, cannot save")
+              o.save(save_opts)
             end
-            association_module_private_def(opts._add_method, opts, &adder)
+          end
     
-            remover = opts[:remover] || proc do |o|
-              if (array = o.send(key)) && !array.empty?
-                array.delete(send(pk))
-                o.save(:validate=>validate) || raise(Sequel::Error, "invalid associated object, cannot save")
+          unless opts.has_key?(:remover)
+            opts[:remover] = proc do |o|
+              if (array = o.get_column_value(key)) && !array.empty?
+                array.delete(get_column_value(pk))
+                o.save(save_opts)
               end
             end
-            association_module_private_def(opts._remove_method, opts, &remover)
+          end
 
-            clearer = opts[:clearer] || proc do
-              opts.associated_dataset.where(Sequel.pg_array_op(key).contains([send(pk)])).update(key=>Sequel.function(:array_remove, key, send(pk)))
+          unless opts.has_key?(:clearer)
+            opts[:clearer] = proc do
+              pk_value = get_column_value(pk)
+              db_type = opts.array_type
+              opts.associated_dataset.where(Sequel.pg_array_op(key).contains(Sequel.pg_array([pk_value], db_type))).update(key=>Sequel.function(:array_remove, key, Sequel.cast(pk_value, db_type)))
             end
-            association_module_private_def(opts._remove_all_method, opts, &clearer)
-
-            def_add_method(opts)
-            def_remove_methods(opts)
           end
         end
 
         # Setup the pg_array_to_many-specific datasets, eager loaders, and modification methods.
         def def_pg_array_to_many(opts)
           name = opts[:name]
-          model = self
           opts[:key] = opts.default_key unless opts.has_key?(:key)
           key = opts[:key]
           key_column = opts[:key_column] ||= key
           opts[:eager_loader_key] = nil
-          opts[:after_load].unshift(:array_uniq!) if opts[:uniq]
-          slice_range = opts.slice_range
+          if opts[:uniq]
+            opts[:after_load] ||= []
+            opts[:after_load].unshift(:array_uniq!)
+          end
           opts[:dataset] ||= lambda do
-            opts.associated_dataset.where(opts.predicate_key=>send(key).to_a)
+            opts.associated_dataset.where(opts.predicate_key=>get_column_value(key).to_a)
           end
           opts[:eager_loader] ||= proc do |eo|
             rows = eo[:rows]
             id_map = {}
             pkm = opts.primary_key_method
-            rows.each do |object|
-              object.associations[name] = []
-              if associated_pks = object.send(key)
-                associated_pks.each do |apk|
-                  (id_map[apk] ||= []) << object
+
+            Sequel.synchronize_with(eo[:mutex]) do
+              rows.each do |object|
+                if associated_pks = object.get_column_value(key)
+                  associated_pks.each do |apk|
+                    (id_map[apk] ||= []) << object
+                  end
                 end
               end
             end
 
-            klass = opts.associated_class
-            ds = model.eager_loading_dataset(opts, klass.where(opts.predicate_key=>id_map.keys), nil, eo[:associations], eo)
-            ds.all do |assoc_record|
-              if objects = id_map[assoc_record.send(pkm)]
+            eo = Hash[eo]
+            eo[:id_map] = id_map
+            eager_load_results(opts, eo) do |assoc_record|
+              if objects = id_map[assoc_record.get_column_value(pkm)]
                 objects.each do |object| 
                   object.associations[name].push(assoc_record)
                 end
               end
-            end
-            if slice_range
-              rows.each{|o| o.associations[name] = o.associations[name][slice_range] || []}
             end
           end
 
@@ -355,53 +477,52 @@ module Sequel
 
           opts[:eager_grapher] ||= proc do |eo|
             ds = eo[:self]
-            ds = ds.graph(eager_graph_dataset(opts, eo), conditions, eo.merge(:select=>select, :join_type=>join_type, :qualify=>:deep, :from_self_alias=>ds.opts[:eager_graph][:master]), &graph_block)
+            ds = ds.graph(eager_graph_dataset(opts, eo), conditions, eo.merge(:select=>select, :join_type=>eo[:join_type]||join_type, :qualify=>:deep), &graph_block)
             ds
           end
 
-          def_association_dataset_methods(opts)
+          return if opts[:read_only]
 
-          unless opts[:read_only]
-            validate = opts[:validate]
-            array_type = opts[:array_type] ||= :integer
-            if opts[:save_after_modify]
-              save_after_modify = proc do |obj|
-                obj.save(:validate=>validate) || raise(Sequel::Error, "invalid associated object, cannot save")
-              end
+          save_opts = {:validate=>opts[:validate]}
+          save_opts[:raise_on_failure] = opts[:raise_on_save_failure] != false
+
+          if opts[:save_after_modify]
+            save_after_modify = proc do |obj|
+              obj.save(save_opts)
             end
+          end
 
-            adder = opts[:adder] || proc do |o|
-              opk = o.send(opts.primary_key) 
-              if array = send(key)
+          unless opts.has_key?(:adder)
+            opts[:adder] = proc do |o|
+              opk = o.get_column_value(opts.primary_key) 
+              if array = get_column_value(key)
                 modified!(key)
                 array << opk
               else
-                send("#{key}=", Sequel.pg_array([opk], array_type))
+                set_column_value("#{key}=", Sequel.pg_array([opk], opts.array_type))
               end
               save_after_modify.call(self) if save_after_modify
             end
-            association_module_private_def(opts._add_method, opts, &adder)
+          end
     
-            remover = opts[:remover] || proc do |o|
-              if (array = send(key)) && !array.empty?
+          unless opts.has_key?(:remover)
+            opts[:remover] = proc do |o|
+              if (array = get_column_value(key)) && !array.empty?
                 modified!(key)
-                array.delete(o.send(opts.primary_key))
+                array.delete(o.get_column_value(opts.primary_key))
                 save_after_modify.call(self) if save_after_modify
               end
             end
-            association_module_private_def(opts._remove_method, opts, &remover)
+          end
 
-            clearer = opts[:clearer] || proc do
-              if (array = send(key)) && !array.empty?
+          unless opts.has_key?(:clearer)
+            opts[:clearer] = proc do
+              if (array = get_column_value(key)) && !array.empty?
                 modified!(key)
                 array.clear
                 save_after_modify.call(self) if save_after_modify
               end
             end
-            association_module_private_def(opts._remove_all_method, opts, &clearer)
-
-            def_add_method(opts)
-            def_remove_methods(opts)
           end
         end
       end
@@ -413,38 +534,44 @@ module Sequel
         def many_to_pg_array_association_filter_expression(op, ref, obj)
           pk = ref.qualify(model.table_name, ref.primary_key)
           key = ref[:key]
+          # :nocov:
           expr = case obj
+          # :nocov:
           when Sequel::Model
-            if (assoc_pks = obj.send(key)) && !assoc_pks.empty?
-              Sequel.expr(pk=>assoc_pks.to_a)
+            if (assoc_pks = obj.get_column_value(key)) && !assoc_pks.empty?
+              Sequel[pk=>assoc_pks.to_a]
             end
           when Array
-            if (assoc_pks = obj.map{|o| o.send(key)}.flatten.compact.uniq) && !assoc_pks.empty?
-              Sequel.expr(pk=>assoc_pks)
+            if (assoc_pks = obj.map{|o| o.get_column_value(key)}.flatten.compact.uniq) && !assoc_pks.empty?
+              Sequel[pk=>assoc_pks]
             end
           when Sequel::Dataset
-            Sequel.expr(pk=>obj.select{Sequel.pg_array_op(ref.qualify(obj.model.table_name, ref[:key_column])).unnest})
+            obj.select(ref.qualify(obj.model.table_name, ref[:key_column]).as(:key)).from_self.where{{pk=>any(:key)}}.select(1).exists
           end
           expr = Sequel::SQL::Constants::FALSE unless expr
+          expr = add_association_filter_conditions(ref, obj, expr)
           association_filter_handle_inversion(op, expr, [pk])
         end
 
         # Support filtering by pg_array_to_many associations using a subquery.
         def pg_array_to_many_association_filter_expression(op, ref, obj)
           key = ref.qualify(model.table_name, ref[:key_column])
+          # :nocov:
           expr = case obj
+          # :nocov:
           when Sequel::Model
-            if pkv = obj.send(ref.primary_key_method)
-              Sequel.pg_array_op(key).contains([pkv])
+            if pkv = obj.get_column_value(ref.primary_key_method)
+              Sequel.pg_array_op(key).contains(Sequel.pg_array([pkv], ref.array_type))
             end
           when Array
-            if (pkvs = obj.map{|o| o.send(ref.primary_key_method)}.compact) && !pkvs.empty?
-              Sequel.pg_array(key).overlaps(pkvs)
+            if (pkvs = obj.map{|o| o.get_column_value(ref.primary_key_method)}.compact) && !pkvs.empty?
+              Sequel.pg_array(key).overlaps(Sequel.pg_array(pkvs, ref.array_type))
             end
           when Sequel::Dataset
             Sequel.function(:coalesce, Sequel.pg_array_op(key).overlaps(obj.select{array_agg(ref.qualify(obj.model.table_name, ref.primary_key))}), Sequel::SQL::Constants::FALSE)
           end
           expr = Sequel::SQL::Constants::FALSE unless expr
+          expr = add_association_filter_conditions(ref, obj, expr)
           association_filter_handle_inversion(op, expr, [key])
         end
       end

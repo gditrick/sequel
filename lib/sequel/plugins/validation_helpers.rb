@@ -1,7 +1,9 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
-    # The validation_helpers plugin contains instance method equivalents for most of the legacy
-    # class-level validations.  The names and APIs are different, though. Example:
+    # The validation_helpers plugin contains validate_* methods designed to be called inside Model#validate
+    # to perform validations:
     #
     #   Sequel::Model.plugin :validation_helpers
     #   class Album < Sequel::Model
@@ -17,9 +19,7 @@ module Sequel
     # atts :: Single attribute symbol or an array of attribute symbols specifying the
     #         attribute(s) to validate.
     # Options:
-    # :allow_blank :: Whether to skip the validation if the value is blank.  You should
-    #                 make sure all objects respond to blank if you use this option, which you can do by:
-    #     Sequel.extension :blank
+    # :allow_blank :: Whether to skip the validation if the value is blank.
     # :allow_missing :: Whether to skip the validation if the attribute isn't a key in the
     #                   values hash.  This is different from allow_nil, because Sequel only sends the attributes
     #                   in the values when doing an insert or update.  If the attribute is not present, Sequel
@@ -30,23 +30,33 @@ module Sequel
     #                   Sequel will attempt to insert a NULL value into the database, instead of using the
     #                   database's default.
     # :allow_nil :: Whether to skip the validation if the value is nil.
+    # :from :: Set to :values to pull column values from the values hash instead of calling the related method.
+    #          Allows for setting up methods on the underlying column values, in the cases where the model
+    #          transforms the underlying value before returning it, such as when using serialization.
     # :message :: The message to use.  Can be a string which is used directly, or a
     #             proc which is called.  If the validation method takes a argument before the array of attributes,
     #             that argument is passed as an argument to the proc.
+    # :skip_invalid :: Do not try to validate columns that are already invalid.
     #
     # The default validation options for all models can be modified by
-    # changing the values of the Sequel::Plugins::ValidationHelpers::DEFAULT_OPTIONS hash.  You
-    # change change the default options on a per model basis
-    # by overriding a private instance method default_validation_helpers_options.
-    #
+    # overridding the Model#default_validation_helpers_options private method.
     # By changing the default options, you can setup internationalization of the
     # error messages.  For example, you would modify the default options:
     #
-    #   Sequel::Plugins::ValidationHelpers::DEFAULT_OPTIONS.merge!(
-    #     :exact_length=>{:message=>lambda{|exact| I18n.t("errors.exact_length", :exact => exact)}},
-    #     :integer=>{:message=>lambda{I18n.t("errors.integer")}},
-    #     ...
-    #   )
+    #   class Sequel::Model
+    #     private
+    #
+    #     def default_validation_helpers_options(type)
+    #       case type
+    #       when :exact_length
+    #         {message: lambda{|exact| I18n.t("errors.exact_length", exact: exact)}}
+    #       when :integer
+    #         {message: lambda{I18n.t("errors.integer")}}
+    #       else
+    #         super
+    #       end
+    #     end
+    #   end
     #
     # and then use something like this in your yaml translation file:
     #
@@ -56,23 +66,20 @@ module Sequel
     #       integer: "is not a number"
     #
     # Note that if you want to support internationalization of Errors#full_messages,
-    # you need to override the method.  Here's an example:
+    # it is easiest to override Errors#full_message (note singular form and not plural form).
+    # Here's an example:
     #   
     #   class Sequel::Model::Errors
-    #     ATTRIBUTE_JOINER = I18n.t('errors.joiner').freeze
-    #     def full_messages
-    #       inject([]) do |m, kv|
-    #         att, errors = *kv
-    #         att.is_a?(Array) ? Array(att).map!{|v| I18n.t("attributes.#{v}")} : att = I18n.t("attributes.#{att}")
-    #         errors.each {|e| m << (e.is_a?(LiteralString) ? e : "#{Array(att).join(ATTRIBUTE_JOINER)} #{e}")}
-    #         m
-    #       end
+    #     private
+    #     def full_message(attribute, error_msg)
+    #       "#{Array(attribute).join(I18n.t('errors.joiner'))} #{error_msg}"
     #     end
     #   end
+    #
+    # It is recommended that users of this plugin that use validates_schema_types also use
+    # the validation_helpers_generic_type_messages plugin for more useful type validation
+    # failure messages.
     module ValidationHelpers
-      # Default validation options used by Sequel.  Can be modified to change the error
-      # messages for all models (e.g. for internationalization), or to set certain
-      # default options for validations (e.g. :allow_nil=>true for all validates_format).
       DEFAULT_OPTIONS = {
         :exact_length=>{:message=>lambda{|exact| "is not #{exact} characters"}},
         :format=>{:message=>lambda{|with| 'is invalid'}},
@@ -80,13 +87,18 @@ module Sequel
         :integer=>{:message=>lambda{"is not a number"}},
         :length_range=>{:message=>lambda{|range| "is too short or too long"}},
         :max_length=>{:message=>lambda{|max| "is longer than #{max} characters"}, :nil_message=>lambda{"is not present"}},
+        :max_value=>{:message=>lambda{|max| "is greater than maximum allowed value"}},
         :min_length=>{:message=>lambda{|min| "is shorter than #{min} characters"}},
+        :min_value=>{:message=>lambda{|min| "is less than minimum allowed value"}},
         :not_null=>{:message=>lambda{"is not present"}},
+        :no_null_byte=>{:message=>lambda{"contains a null byte"}},
         :numeric=>{:message=>lambda{"is not a number"}},
+        :operator=>{:message=>lambda{|operator, rhs| "is not #{operator} #{rhs}"}},
         :type=>{:message=>lambda{|klass| klass.is_a?(Array) ? "is not a valid #{klass.join(" or ").downcase}" : "is not a valid #{klass.to_s.downcase}"}},
         :presence=>{:message=>lambda{"is not present"}},
         :unique=>{:message=>lambda{'is already taken'}}
-      }
+      }.freeze
+      DEFAULT_OPTIONS.each_value(&:freeze)
 
       module InstanceMethods 
         # Check that the attribute values are the given exact length.
@@ -101,7 +113,7 @@ module Sequel
     
         # Check attribute value(s) is included in the given set.
         def validates_includes(set, atts, opts=OPTS)
-          validatable_attributes_for_type(:includes, atts, opts){|a,v,m| validation_error_message(m, set) unless set.send(set.respond_to?(:cover?) ? :cover? : :include?, v)}
+          validatable_attributes_for_type(:includes, atts, opts){|a,v,m| validation_error_message(m, set) unless set.public_send(set.respond_to?(:cover?) ? :cover? : :include?, v)}
         end
     
         # Check attribute value(s) string representation is a valid integer.
@@ -118,7 +130,7 @@ module Sequel
 
         # Check that the attribute values length is in the specified range.
         def validates_length_range(range, atts, opts=OPTS)
-          validatable_attributes_for_type(:length_range, atts, opts){|a,v,m| validation_error_message(m, range) if v.nil? || !range.send(range.respond_to?(:cover?) ? :cover? : :include?, v.length)}
+          validatable_attributes_for_type(:length_range, atts, opts){|a,v,m| validation_error_message(m, range) if v.nil? || !range.cover?(v.length)}
         end
     
         # Check that the attribute values are not longer than the given max length.
@@ -126,7 +138,22 @@ module Sequel
         # Accepts a :nil_message option that is the error message to use when the
         # value is nil instead of being too long.
         def validates_max_length(max, atts, opts=OPTS)
-          validatable_attributes_for_type(:max_length, atts, opts){|a,v,m| v ? validation_error_message(m, max) : validation_error_message(opts[:nil_message] || DEFAULT_OPTIONS[:max_length][:nil_message]) if v.nil? || v.length > max}
+          validatable_attributes_for_type(:max_length, atts, opts) do |a,v,m|
+            if v.nil?
+              validation_error_message(opts[:nil_message] || default_validation_helpers_options(:max_length)[:nil_message])
+            elsif v.length > max
+              validation_error_message(m, max)
+            end
+          end
+        end
+
+        # Check that the attribute values are not greater that the given maximum value.
+        # Does not perform validation if attribute value is nil.
+        # You should only call this if you have checked the attribute value has the expected type.
+        def validates_max_value(max, atts, opts=OPTS)
+          validatable_attributes_for_type(:max_value, atts, opts) do |a,v,m|
+            validation_error_message(m, max) if !v.nil? && v > max
+          end
         end
 
         # Check that the attribute values are not shorter than the given min length.
@@ -134,9 +161,23 @@ module Sequel
           validatable_attributes_for_type(:min_length, atts, opts){|a,v,m| validation_error_message(m, min) if v.nil? || v.length < min}
         end
 
+        # Check that the attribute values are not less that the given minimum value.
+        # Does not perform validation if attribute value is nil.
+        # You should only call this if you have checked the attribute value has the expected type.
+        def validates_min_value(min, atts, opts=OPTS)
+          validatable_attributes_for_type(:min_value, atts, opts) do |a,v,m|
+            validation_error_message(m, min) if !v.nil? && v < min
+          end
+        end
+
         # Check attribute value(s) are not NULL/nil.
         def validates_not_null(atts, opts=OPTS)
           validatable_attributes_for_type(:not_null, atts, opts){|a,v,m| validation_error_message(m) if v.nil?}
+        end
+
+        # Check attribute value(s) does not contain a null ("\0", ASCII NUL) byte.
+        def validates_no_null_byte(atts, opts=OPTS)
+          validatable_attributes_for_type(:no_null_byte, atts, opts){|a,v,m| validation_error_message(m) if String === v && v.include?("\0")}
         end
         
         # Check attribute value(s) string representation is a valid float.
@@ -151,13 +192,19 @@ module Sequel
           end
         end
 
+        # Check attribute value(s) against a specified value and operation, e.g.
+        # validates_operator(:>, 3, :value) validates that value > 3.
+        def validates_operator(operator, rhs, atts, opts=OPTS)
+          validatable_attributes_for_type(:operator, atts, opts){|a,v,m| validation_error_message(m, operator, rhs) if v.nil? || !v.public_send(operator, rhs)}
+        end
+
         # Validates for all of the model columns (or just the given columns)
         # that the column value is an instance of the expected class based on
         # the column's schema type.
         def validates_schema_types(atts=keys, opts=OPTS)
           Array(atts).each do |k|
             if type = schema_type_class(k)
-              validates_type(type, k, {:allow_nil=>true}.merge(opts))
+              validates_type(type, k, {:allow_nil=>true}.merge!(opts))
             end
           end
         end
@@ -168,7 +215,7 @@ module Sequel
           klass = klass.to_s.constantize if klass.is_a?(String) || klass.is_a?(Symbol)
           validatable_attributes_for_type(:type, atts, opts) do |a,v,m|
             if klass.is_a?(Array) ? !klass.any?{|kls| v.is_a?(kls)} : !v.is_a?(klass)
-              validation_error_message(m, klass)
+              validates_type_error_message(m, klass)
             end
           end
         end
@@ -193,7 +240,7 @@ module Sequel
         # must be unique. So if you are doing a soft delete of records, in which
         # the name must be unique, but only for active records:
         #
-        #   validates_unique(:name){|ds| ds.filter(:active)}
+        #   validates_unique(:name){|ds| ds.where(:active)}
         #
         # You should also add a unique index in the
         # database, as this suffers from a fairly obvious race condition.
@@ -202,20 +249,22 @@ module Sequel
         # since it can deal with a grouping of multiple attributes.
         #
         # Possible Options:
+        # :dataset :: The base dataset to use for the unique query, defaults to the
+        #             model's dataset.
         # :message :: The message to use (default: 'is already taken')
         # :only_if_modified :: Only check the uniqueness if the object is new or
-        #                      one of the columns has been modified.
+        #                      one of the columns has been modified, true by default.
         # :where :: A callable object where call takes three arguments, a dataset,
         #           the current object, and an array of columns, and should return
         #           a modified dataset that is filtered to include only rows with
         #           the same values as the current object for each column in the array.
         #
-        # If you want to to a case insensitive uniqueness validation on a database that
+        # If you want to do a case insensitive uniqueness validation on a database that
         # is case sensitive by default, you can use:
         #
-        #   :where=>(proc do |ds, obj, cols|
+        #   validates_unique :column, where:(lambda do |ds, obj, cols|
         #     ds.where(cols.map do |c|
-        #       v = obj.send(c)
+        #       v = obj.public_send(c)
         #       v = v.downcase if v
         #       [Sequel.function(:lower, c), v]
         #     end)
@@ -226,21 +275,27 @@ module Sequel
             opts = opts.merge(atts.pop)
           end
           message = validation_error_message(opts[:message])
+          from_values = opts[:from] == :values
           where = opts[:where]
           atts.each do |a|
             arr = Array(a)
             next if arr.any?{|x| errors.on(x)}
-            next if opts[:only_if_modified] && !new? && !arr.any?{|x| changed_columns.include?(x)}
+            cc = changed_columns
+            next if opts.fetch(:only_if_modified, true) && !new? && !arr.any?{|x| cc.include?(x)}
+            ds = opts[:dataset] || model.dataset
             ds = if where
-              where.call(model.dataset, self, arr)
+              where.call(ds, self, arr)
             else
-              vals = arr.map{|x| send(x)}
-              next if vals.any?{|v| v.nil?}
-              model.where(arr.zip(vals))
+              vals = arr.map{|x| from_values ? values[x] : get_column_value(x)}
+              next if vals.any?(&:nil?)
+              ds.where(arr.zip(vals))
             end
-            ds = yield(ds) if block_given?
-            ds = ds.exclude(pk_hash) unless new?
-            errors.add(a, message) unless ds.count == 0
+            ds = yield(ds) if defined?(yield)
+            unless new?
+              h = ds.joined_dataset? ? qualified_pk_hash : pk_hash
+              ds = ds.exclude(h)
+            end
+            errors.add(a, message) unless ds.empty?
           end
         end
         
@@ -254,17 +309,21 @@ module Sequel
           DEFAULT_OPTIONS[type]
         end
 
-        # Skip validating any attribute that matches one of the allow_* options.
+        # Skip validating any attribute that matches one of the allow_* options,
+        # or already has an error if the skip_invalid option is given.
+        #
         # Otherwise, yield the attribute, value, and passed option :message to
         # the block.  If the block returns anything except nil or false, add it as
         # an error message for that attributes.
         def validatable_attributes(atts, opts)
-          am, an, ab, m = opts.values_at(:allow_missing, :allow_nil, :allow_blank, :message)
+          am, an, ab, m, si = opts.values_at(:allow_missing, :allow_nil, :allow_blank, :message, :skip_invalid)
+          from_values = opts[:from] == :values
           Array(atts).each do |a|
+            next if si && errors.on(a)
             next if am && !values.has_key?(a)
-            v = send(a)
+            v = from_values ? values[a] : get_column_value(a)
             next if an && v.nil?
-            next if ab && v.respond_to?(:blank?) && v.blank?
+            next if ab && model.db.send(:blank_object?, v)
             if message = yield(a, v, m)
               errors.add(a, message)
             end
@@ -283,6 +342,9 @@ module Sequel
         def validation_error_message(message, *args)
           message.is_a?(Proc) ? message.call(*args) : message
         end
+
+        # The validation error message for type validations, for the given class.
+        alias validates_type_error_message validation_error_message
       end
     end
   end

@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The columns_introspection extension attempts to introspect the
 # selected columns for a dataset before issuing a query.  If it
 # thinks it can guess correctly at the columns the query will use,
@@ -14,7 +16,10 @@
 # To attempt to introspect columns for all datasets on a single database:
 #
 #   DB.extension(:columns_introspection)
+#
+# Related module: Sequel::ColumnsIntrospection
 
+#
 module Sequel
   module ColumnsIntrospection
     # Attempt to guess the columns that will be returned
@@ -23,9 +28,11 @@ module Sequel
     # Symbols, SQL::Identifiers, SQL::QualifiedIdentifiers, and
     # SQL::AliasedExpressions.
     def columns
-      return @columns if @columns
+      if cols = _columns
+        return cols
+      end
       if (pcs = probable_columns) && pcs.all?
-        @columns = pcs
+        self.columns = pcs
       else
         super
       end
@@ -49,7 +56,7 @@ module Sequel
           from.probable_columns
         when Symbol, SQL::Identifier, SQL::QualifiedIdentifier
           schemas = db.instance_variable_get(:@schemas)
-          if schemas && (sch = Sequel.synchronize{schemas[literal(from)]})
+          if schemas && (table = literal(from)) && (sch = Sequel.synchronize{schemas[table]})
             sch.map{|c,_| c}
           end
         end
@@ -68,10 +75,9 @@ module Sequel
       when SQL::Identifier
         c.value.to_sym
       when SQL::QualifiedIdentifier
-        col = c.column
-        col.is_a?(SQL::Identifier) ? col.value.to_sym : col.to_sym
+        c.column.to_sym
       when SQL::AliasedExpression
-        a = c.aliaz
+        a = c.alias
         a.is_a?(SQL::Identifier) ? a.value.to_sym : a.to_sym
       end
     end

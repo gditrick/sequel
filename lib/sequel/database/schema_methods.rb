@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   class Database
     # ---------------------
@@ -5,32 +7,19 @@ module Sequel
     # These methods execute code on the database that modifies the database's schema.
     # ---------------------
 
-    AUTOINCREMENT = 'AUTOINCREMENT'.freeze
-    COMMA_SEPARATOR = ', '.freeze
-    NOT_NULL = ' NOT NULL'.freeze
-    NULL = ' NULL'.freeze
-    PRIMARY_KEY = ' PRIMARY KEY'.freeze
-    TEMPORARY = 'TEMPORARY '.freeze
-    UNDERSCORE = '_'.freeze
-    UNIQUE = ' UNIQUE'.freeze
-    UNSIGNED = ' UNSIGNED'.freeze
-
     # The order of column modifiers to use when defining a column.
-    COLUMN_DEFINITION_ORDER = [:collate, :default, :null, :unique, :primary_key, :auto_increment, :references]
-
-    # The default options for join table columns.
-    DEFAULT_JOIN_TABLE_COLUMN_OPTIONS = {:null=>false}
+    COLUMN_DEFINITION_ORDER = [:collate, :default, :null, :unique, :primary_key, :auto_increment, :references].freeze
 
     # The alter table operations that are combinable.
     COMBINABLE_ALTER_TABLE_OPS = [:add_column, :drop_column, :rename_column,
       :set_column_type, :set_column_default, :set_column_null,
-      :add_constraint, :drop_constraint]
+      :add_constraint, :drop_constraint].freeze
 
     # Adds a column to the specified table. This method expects a column name,
     # a datatype and optionally a hash with additional constraints and options:
     #
-    #   DB.add_column :items, :name, :text, :unique => true, :null => false
-    #   DB.add_column :items, :category, :text, :default => 'ruby'
+    #   DB.add_column :items, :name, String, unique: true, null: false
+    #   DB.add_column :items, :category, String, default: 'ruby'
     #
     # See <tt>alter_table</tt>.
     def add_column(table, *args)
@@ -40,10 +29,12 @@ module Sequel
     # Adds an index to a table for the given columns:
     # 
     #   DB.add_index :posts, :title
-    #   DB.add_index :posts, [:author, :title], :unique => true
+    #   DB.add_index :posts, [:author, :title], unique: true
     #
     # Options:
+    #
     # :ignore_errors :: Ignore any DatabaseErrors that are raised
+    # :name :: Name to use for index instead of default
     #
     # See <tt>alter_table</tt>.
     def add_index(table, columns, options=OPTS)
@@ -53,16 +44,17 @@ module Sequel
       rescue DatabaseError
         raise unless e
       end
+      nil
     end
     
     # Alters the given table with the specified block. Example:
     #
     #   DB.alter_table :items do
-    #     add_column :category, :text, :default => 'ruby'
+    #     add_column :category, String, default: 'ruby'
     #     drop_column :category
     #     rename_column :cntr, :counter
-    #     set_column_type :value, :float
-    #     set_column_default :value, :float
+    #     set_column_type :value, Float
+    #     set_column_default :value, 4.2
     #     add_index [:group, :category]
     #     drop_index [:group, :category]
     #   end
@@ -71,9 +63,9 @@ module Sequel
     # definitions using <tt>create_table</tt>, and +add_index+ accepts all the options
     # available for index definition.
     #
-    # See <tt>Schema::AlterTableGenerator</tt> and the {"Migrations and Schema Modification" guide}[link:files/doc/migration_rdoc.html].
-    def alter_table(name, generator=nil, &block)
-      generator ||= alter_table_generator(&block)
+    # See <tt>Schema::AlterTableGenerator</tt> and the {Migrations guide}[rdoc-ref:doc/migration.rdoc].
+    def alter_table(name, &block)
+      generator = alter_table_generator(&block)
       remove_cached_schema(name)
       apply_alter_table_generator(name, generator)
       nil
@@ -88,7 +80,7 @@ module Sequel
     # Create a join table using a hash of foreign keys to referenced
     # table names.  Example:
     #
-    #   create_join_table(:cat_id=>:cats, :dog_id=>:dogs)
+    #   create_join_table(cat_id: :cats, dog_id: :dogs)
     #   # CREATE TABLE cats_dogs (
     #   #  cat_id integer NOT NULL REFERENCES cats,
     #   #  dog_id integer NOT NULL REFERENCES dogs,
@@ -101,15 +93,22 @@ module Sequel
     # key ensures that entries in the table are unique, which is the typical
     # desire for a join table.
     #
+    # The default table name this will create is the sorted version of the two
+    # hash values, joined by an underscore.  So the following two method calls
+    # create the same table:
+    #
+    #   create_join_table(cat_id: :cats, dog_id: :dogs) # cats_dogs
+    #   create_join_table(dog_id: :dogs, cat_id: :cats) # cats_dogs
+    #
     # You can provide column options by making the values in the hash
     # be option hashes, so long as the option hashes have a :table
     # entry giving the table referenced:
     #
-    #   create_join_table(:cat_id=>{:table=>:cats, :type=>Bignum}, :dog_id=>:dogs)
+    #   create_join_table(cat_id: {table: :cats, type: :Bignum}, dog_id: :dogs)
     #   
     # You can provide a second argument which is a table options hash:
     #
-    #   create_join_table({:cat_id=>:cats, :dog_id=>:dogs}, :temp=>true)
+    #   create_join_table({cat_id: :cats, dog_id: :dogs}, temp: true)
     #
     # Some table options are handled specially:
     #
@@ -118,18 +117,34 @@ module Sequel
     # :no_index :: Set to true not to create the second index.
     # :no_primary_key :: Set to true to not create the primary key.
     def create_join_table(hash, options=OPTS)
-      keys = hash.keys.sort_by{|k| k.to_s}
+      keys = hash.keys.sort
       create_table(join_table_name(hash, options), options) do
         keys.each do |key|
           v = hash[key]
           unless v.is_a?(Hash)
             v = {:table=>v}
           end
-          v = DEFAULT_JOIN_TABLE_COLUMN_OPTIONS.merge(v)
+          v[:null] = false unless v.has_key?(:null)
           foreign_key(key, v)
         end
         primary_key(keys) unless options[:no_primary_key]
-        index(keys.reverse, options[:index_options] || {}) unless options[:no_index]
+        index(keys.reverse, options[:index_options] || OPTS) unless options[:no_index]
+      end
+      nil
+    end
+
+    # Forcibly create a join table, attempting to drop it if it already exists, then creating it.
+    def create_join_table!(hash, options=OPTS)
+      drop_table?(join_table_name(hash, options))
+      create_join_table(hash, options)
+    end
+    
+    # Creates the join table unless it already exists.
+    def create_join_table?(hash, options=OPTS)
+      if supports_create_table_if_not_exists? && options[:no_index]
+        create_join_table(hash, options.merge(:if_not_exists=>true))
+      elsif !table_exists?(join_table_name(hash, options))
+        create_join_table(hash, options)
       end
     end
 
@@ -137,7 +152,7 @@ module Sequel
     #
     #   DB.create_table :posts do
     #     primary_key :id
-    #     column :title, :text
+    #     column :title, String
     #     String :content
     #     index :title
     #   end
@@ -155,14 +170,39 @@ module Sequel
     # :engine :: The table engine to use for the table.
     #
     # PostgreSQL specific options:
-    # :unlogged :: Create the table as an unlogged table.
-    # :inherits :: Inherit from a different tables.  An array can be
+    # :on_commit :: Either :preserve_rows (default), :drop or :delete_rows. Should
+    #               only be specified when creating a temporary table.
+    # :foreign :: Create a foreign table.  The value should be the name of the
+    #             foreign server that was specified in CREATE SERVER.
+    # :inherits :: Inherit from a different table.  An array can be
     #              specified to inherit from multiple tables.
+    # :unlogged :: Create the table as an unlogged table.
+    # :options :: The OPTIONS clause to use for foreign tables.  Should be a hash
+    #             where keys are option names and values are option values.  Note
+    #             that option names are unquoted, so you should not use untrusted
+    #             keys.
+    # :tablespace :: The tablespace to use for the table.
     #
-    # See <tt>Schema::Generator</tt> and the {"Schema Modification" guide}[link:files/doc/schema_modification_rdoc.html].
+    # SQLite specific options:
+    # :strict :: Create a STRICT table, which checks that the values for the columns
+    #            are the correct type (similar to all other SQL databases). Note that
+    #            when using this option, all column types used should be one of the
+    #            following: +int+, +integer+, +real+, +text+, +blob+, and +any+.
+    #            The +any+ type is treated like a SQLite column in a non-strict table,
+    #            allowing any type of data to be stored. This option is supported on
+    #            SQLite 3.37.0+.
+    # :using :: Create a VIRTUAL table with the given USING clause. The value should be
+    #           a string, as it is used directly in the SQL query.
+    # :without_rowid :: Create a WITHOUT ROWID table. Every row in SQLite has a special
+    #                   'rowid' column, that uniquely identifies that row within the table.
+    #                   If this option is used, the 'rowid' column is omitted, which can
+    #                   sometimes provide some space and speed advantages. Note that you
+    #                   must then provide an explicit primary key when you create the table.
+    #                   This option is supported on SQLite 3.8.2+.
+    #
+    # See <tt>Schema::CreateTableGenerator</tt> and the {"Schema Modification" guide}[rdoc-ref:doc/schema_modification.rdoc].
     def create_table(name, options=OPTS, &block)
       remove_cached_schema(name)
-      options = {:generator=>options} if options.is_a?(Schema::CreateTableGenerator)
       if sql = options[:as]
         raise(Error, "can't provide both :as option and block to create_table") if block
         create_table_as(name, sql, options)
@@ -170,8 +210,8 @@ module Sequel
         generator = options[:generator] || create_table_generator(&block)
         create_table_from_generator(name, generator, options)
         create_table_indexes_from_generator(name, generator, options)
-        nil
       end
+      nil
     end
 
     # Forcibly create a table, attempting to drop it if it already exists, then creating it.
@@ -191,10 +231,12 @@ module Sequel
     #   # SELECT NULL FROM a LIMIT 1 -- check existence
     #   # CREATE TABLE a (a integer) -- if it doesn't already exist
     def create_table?(name, options=OPTS, &block)
-      if supports_create_table_if_not_exists?
-        create_table(name, options.merge(:if_not_exists=>true), &block)
+      options = options.dup
+      generator = options[:generator] ||= create_table_generator(&block)
+      if generator.indexes.empty? && supports_create_table_if_not_exists?
+        create_table(name, options.merge!(:if_not_exists=>true))
       elsif !table_exists?(name)
-        create_table(name, options, &block)
+        create_table(name, options)
       end
     end
 
@@ -207,33 +249,52 @@ module Sequel
     # Creates a view, replacing a view with the same name if one already exists.
     #
     #   DB.create_or_replace_view(:some_items, "SELECT * FROM items WHERE price < 100")
-    #   DB.create_or_replace_view(:some_items, DB[:items].filter(:category => 'ruby'))
+    #   DB.create_or_replace_view(:some_items, DB[:items].where(category: 'ruby'))
     #
     # For databases where replacing a view is not natively supported, support
     # is emulated by dropping a view with the same name before creating the view.
     def create_or_replace_view(name, source, options = OPTS)
-      if supports_create_or_replace_view?
+      if supports_create_or_replace_view? && !options[:materialized]
         options = options.merge(:replace=>true)
       else
-        drop_view(name) rescue nil
+        swallow_database_error{drop_view(name, options)}
       end
 
       create_view(name, source, options)
+      nil
     end
     
     # Creates a view based on a dataset or an SQL string:
     #
     #   DB.create_view(:cheap_items, "SELECT * FROM items WHERE price < 100")
-    #   DB.create_view(:ruby_items, DB[:items].filter(:category => 'ruby'))
+    #   # CREATE VIEW cheap_items AS
+    #   # SELECT * FROM items WHERE price < 100
+    #
+    #   DB.create_view(:ruby_items, DB[:items].where(category: 'ruby'))
+    #   # CREATE VIEW ruby_items AS
+    #   # SELECT * FROM items WHERE (category = 'ruby')
+    #
+    #   DB.create_view(:checked_items, DB[:items].where(:foo), check: true)
+    #   # CREATE VIEW checked_items AS
+    #   # SELECT * FROM items WHERE foo
+    #   # WITH CHECK OPTION
+    #
+    #   DB.create_view(:bar_items, DB[:items].select(:foo), columns: [:bar])
+    #   # CREATE VIEW bar_items (bar) AS
+    #   # SELECT foo FROM items
     #
     # Options:
     # :columns :: The column names to use for the view.  If not given,
     #             automatically determined based on the input dataset.
+    # :check :: Adds a WITH CHECK OPTION clause, so that attempting to modify 
+    #           rows in the underlying table that would not be returned by the
+    #           view is not allowed.  This can be set to :local to use WITH
+    #           LOCAL CHECK OPTION.
     #
     # PostgreSQL/SQLite specific option:
     # :temp :: Create a temporary view, automatically dropped on disconnect.
     #
-    # PostgreSQL specific option:
+    # PostgreSQL specific options:
     # :materialized :: Creates a materialized view, similar to a regular view,
     #                  but backed by a physical table.
     # :recursive :: Creates a recursive view.  As columns must be specified for
@@ -241,7 +302,11 @@ module Sequel
     #               option.  Since a recursive view requires a union that isn't
     #               in a subquery, if you are providing a Dataset as the source
     #               argument, if should probably call the union method with the
-    #               :all=>true and :from_self=>false options.
+    #               all: true and from_self: false options.
+    # :security_invoker :: Set the security_invoker property on the view, making
+    #                      the access to the view use the current user's permissions,
+    #                      instead of the view owner's permissions.
+    # :tablespace :: The tablespace to use for materialized views.
     def create_view(name, source, options = OPTS)
       execute_ddl(create_view_sql(name, source, options))
       remove_cached_schema(name)
@@ -257,7 +322,7 @@ module Sequel
       alter_table(table) {drop_column(*args)}
     end
     
-    # Removes an index for the given table and column/s:
+    # Removes an index for the given table and column(s):
     #
     #   DB.drop_index :posts, :title
     #   DB.drop_index :posts, [:author, :title]
@@ -270,7 +335,7 @@ module Sequel
     # Drop the join table that would have been created with the
     # same arguments to create_join_table:
     #
-    #   drop_join_table(:cat_id=>:cats, :dog_id=>:dogs)
+    #   drop_join_table(cat_id: :cats, dog_id: :dogs)
     #   # DROP TABLE cats_dogs
     def drop_join_table(hash, options=OPTS)
       drop_table(join_table_name(hash, options), options)
@@ -280,9 +345,9 @@ module Sequel
     #
     #   DB.drop_table(:posts) # DROP TABLE posts
     #   DB.drop_table(:posts, :comments)
-    #   DB.drop_table(:posts, :comments, :cascade=>true)
+    #   DB.drop_table(:posts, :comments, cascade: true)
     def drop_table(*names)
-      options = names.last.is_a?(Hash) ? names.pop : {}
+      options = names.last.is_a?(Hash) ? names.pop : OPTS 
       names.each do |n|
         execute_ddl(drop_table_sql(n, options))
         remove_cached_schema(n)
@@ -297,7 +362,7 @@ module Sequel
     #   # SELECT NULL FROM a LIMIT 1 -- check existence
     #   # DROP TABLE a -- if it already exists
     def drop_table?(*names)
-      options = names.last.is_a?(Hash) ? names.pop : {}
+      options = names.last.is_a?(Hash) ? names.pop : OPTS
       if supports_drop_table_if_exists?
         options = options.merge(:if_exists=>true)
         names.each do |name|
@@ -308,22 +373,24 @@ module Sequel
           drop_table(name, options) if table_exists?(name)
         end
       end
+      nil
     end
     
     # Drops one or more views corresponding to the given names:
     #
     #   DB.drop_view(:cheap_items)
     #   DB.drop_view(:cheap_items, :pricey_items)
-    #   DB.drop_view(:cheap_items, :pricey_items, :cascade=>true)
+    #   DB.drop_view(:cheap_items, :pricey_items, cascade: true)
+    #   DB.drop_view(:cheap_items, :pricey_items, if_exists: true)
     #
     # Options:
     # :cascade :: Also drop objects depending on this view.
+    # :if_exists :: Do not raise an error if the view does not exist.
     #
     # PostgreSQL specific options:
-    # :if_exists :: Do not raise an error if the view does not exist.
     # :materialized :: Drop a materialized view.
     def drop_view(*names)
-      options = names.last.is_a?(Hash) ? names.pop : {}
+      options = names.last.is_a?(Hash) ? names.pop : OPTS
       names.each do |n|
         execute_ddl(drop_view_sql(n, options))
         remove_cached_schema(n)
@@ -379,7 +446,15 @@ module Sequel
     
     # Apply the operations in the given generator to the table given by name.
     def apply_alter_table_generator(name, generator)
-      apply_alter_table(name, generator.operations)
+      ops = generator.operations
+
+      unless can_add_primary_key_constraint_on_nullable_columns?
+        if add_pk = ops.find{|op| op[:op] == :add_constraint && op[:type] == :primary_key}
+          ops = add_pk[:columns].map{|column| {:op => :set_column_null, :name => column, :null => false}} + ops
+        end
+      end
+
+      apply_alter_table(name, ops)
     end
 
     # The class used for alter_table generators.
@@ -389,33 +464,52 @@ module Sequel
     
     # SQL fragment for given alter table operation.
     def alter_table_op_sql(table, op)
-      quoted_name = quote_identifier(op[:name]) if op[:name]
-      case op[:op]
-      when :add_column
-        "ADD COLUMN #{column_definition_sql(op)}"
-      when :drop_column
-        "DROP COLUMN #{quoted_name}#{' CASCADE' if op[:cascade]}"
-      when :rename_column
-        "RENAME COLUMN #{quoted_name} TO #{quote_identifier(op[:new_name])}"
-      when :set_column_type
-        "ALTER COLUMN #{quoted_name} TYPE #{type_literal(op)}"
-      when :set_column_default
-        "ALTER COLUMN #{quoted_name} SET DEFAULT #{literal(op[:default])}"
-      when :set_column_null
-        "ALTER COLUMN #{quoted_name} #{op[:null] ? 'DROP' : 'SET'} NOT NULL"
-      when :add_constraint
-        "ADD #{constraint_definition_sql(op)}"
-      when :drop_constraint
-        if op[:type] == :foreign_key
-          quoted_name ||= quote_identifier(foreign_key_name(table, op[:columns]))
-        end
-        "DROP CONSTRAINT #{quoted_name}#{' CASCADE' if op[:cascade]}"
+      meth = "alter_table_#{op[:op]}_sql"
+      if respond_to?(meth, true)
+        # Allow calling private methods as alter table op sql methods are private
+        send(meth, table, op)
       else
         raise Error, "Unsupported ALTER TABLE operation: #{op[:op]}"
       end
     end
 
-    # The SQL to execute to modify the DDL for the given table name.  op
+    def alter_table_add_column_sql(table, op)
+      "ADD COLUMN #{column_definition_sql(op)}"
+    end
+
+    def alter_table_drop_column_sql(table, op)
+      "DROP COLUMN #{quote_identifier(op[:name])}#{' CASCADE' if op[:cascade]}"
+    end
+
+    def alter_table_rename_column_sql(table, op)
+      "RENAME COLUMN #{quote_identifier(op[:name])} TO #{quote_identifier(op[:new_name])}"
+    end
+
+    def alter_table_set_column_type_sql(table, op)
+      "ALTER COLUMN #{quote_identifier(op[:name])} TYPE #{type_literal(op)}"
+    end
+
+    def alter_table_set_column_default_sql(table, op)
+      "ALTER COLUMN #{quote_identifier(op[:name])} SET DEFAULT #{literal(op[:default])}"
+    end
+
+    def alter_table_set_column_null_sql(table, op)
+      "ALTER COLUMN #{quote_identifier(op[:name])} #{op[:null] ? 'DROP' : 'SET'} NOT NULL"
+    end
+
+    def alter_table_add_constraint_sql(table, op)
+      "ADD #{constraint_definition_sql(op)}"
+    end
+
+    def alter_table_drop_constraint_sql(table, op)
+      quoted_name = quote_identifier(op[:name]) if op[:name]
+      if op[:type] == :foreign_key
+        quoted_name ||= quote_identifier(foreign_key_name(table, op[:columns]))
+      end
+      "DROP CONSTRAINT #{quoted_name}#{' CASCADE' if op[:cascade]}"
+    end
+
+    # The SQL to execute to modify the table.  op
     # should be one of the operations returned by the AlterTableGenerator.
     def alter_table_sql(table, op)
       case op[:op]
@@ -424,12 +518,14 @@ module Sequel
       when :drop_index
         drop_index_sql(table, op)
       else
-        "ALTER TABLE #{quote_schema_table(table)} #{alter_table_op_sql(table, op)}"
+        if sql = alter_table_op_sql(table, op)
+          "ALTER TABLE #{quote_schema_table(table)} #{sql}"
+        end
       end
     end
 
-    # Array of SQL DDL modification statements for the given table,
-    # corresponding to the DDL changes specified by the operations.
+    # Array of SQL statements used to modify the table,
+    # corresponding to changes specified by the operations.
     def alter_table_sql_list(table, operations)
       if supports_combining_alter_table_ops?
         grouped_ops = []
@@ -461,17 +557,18 @@ module Sequel
     # The SQL string specify the autoincrement property, generally used by
     # primary keys.
     def auto_increment_sql
-      AUTOINCREMENT
+      'AUTOINCREMENT'
     end
     
     # The order of the column definition, as an array of symbols.
     def column_definition_order
-      self.class.const_get(:COLUMN_DEFINITION_ORDER)
+      COLUMN_DEFINITION_ORDER
     end
 
-    # SQL DDL fragment containing the column creation SQL for the given column.
+    # SQL fragment containing the column creation SQL for the given column.
     def column_definition_sql(column)
-      sql = "#{quote_identifier(column[:name])} #{type_literal(column)}"
+      sql = String.new
+      sql << "#{quote_identifier(column[:name])} #{type_literal(column)}"
       column_definition_order.each{|m| send(:"column_definition_#{m}_sql", sql, column)}
       sql
     end
@@ -483,7 +580,9 @@ module Sequel
 
     # Add collate SQL fragment to column creation SQL.
     def column_definition_collate_sql(sql, column)
-      sql << " COLLATE #{column[:collate]}" if column[:collate]
+      if collate = column[:collate]
+        sql << " COLLATE #{collate}"
+      end
     end
 
     # Add default SQL fragment to column creation SQL.
@@ -494,17 +593,26 @@ module Sequel
     # Add null/not null SQL fragment to column creation SQL.
     def column_definition_null_sql(sql, column)
       null = column.fetch(:null, column[:allow_null])
-      sql << NOT_NULL if null == false
-      sql << NULL if null == true
+      if null.nil? && !can_add_primary_key_constraint_on_nullable_columns? && column[:primary_key]
+        null = false
+      end
+
+      case null
+      when false
+        sql << ' NOT NULL'
+      when true
+        sql << ' NULL'
+      end
     end
-    
+
     # Add primary key SQL fragment to column creation SQL.
     def column_definition_primary_key_sql(sql, column)
       if column[:primary_key]
         if name = column[:primary_key_constraint_name]
           sql << " CONSTRAINT #{quote_identifier(name)}"
         end
-        sql << PRIMARY_KEY
+        sql << " " << primary_key_constraint_sql_fragment(column)
+        constraint_deferrable_sql_append(sql, column[:primary_key_deferrable])
       end
     end
     
@@ -524,44 +632,46 @@ module Sequel
         if name = column[:unique_constraint_name]
           sql << " CONSTRAINT #{quote_identifier(name)}"
         end
-        sql << UNIQUE
+        sql << ' ' << unique_constraint_sql_fragment(column)
+        constraint_deferrable_sql_append(sql, column[:unique_deferrable])
       end
     end
     
     # SQL for all given columns, used inside a CREATE TABLE block.
     def column_list_sql(generator)
-      (generator.columns.map{|c| column_definition_sql(c)} + generator.constraints.map{|c| constraint_definition_sql(c)}).join(COMMA_SEPARATOR)
+      (generator.columns.map{|c| column_definition_sql(c)} + generator.constraints.map{|c| constraint_definition_sql(c)}).join(', ')
     end
 
-    # SQL DDL fragment for column foreign key references (column constraints)
+    # SQL fragment for column foreign key references (column constraints)
     def column_references_column_constraint_sql(column)
       column_references_sql(column)
     end
 
-    # SQL DDL fragment for column foreign key references
+    # SQL fragment for column foreign key references
     def column_references_sql(column)
-      sql = " REFERENCES #{quote_schema_table(column[:table])}"
-      sql << "(#{Array(column[:key]).map{|x| quote_identifier(x)}.join(COMMA_SEPARATOR)})" if column[:key]
+      sql = String.new
+      sql << " REFERENCES #{quote_schema_table(column[:table])}"
+      sql << "(#{Array(column[:key]).map{|x| quote_identifier(x)}.join(', ')})" if column[:key]
       sql << " ON DELETE #{on_delete_clause(column[:on_delete])}" if column[:on_delete]
       sql << " ON UPDATE #{on_update_clause(column[:on_update])}" if column[:on_update]
       constraint_deferrable_sql_append(sql, column[:deferrable])
       sql
     end
   
-    # SQL DDL fragment for table foreign key references (table constraints)
+    # SQL fragment for table foreign key references (table constraints)
     def column_references_table_constraint_sql(constraint)
       "FOREIGN KEY #{literal(constraint[:columns])}#{column_references_sql(constraint)}"
     end
 
     # Whether the given alter table operation is combinable.
     def combinable_alter_table_op?(op)
-      # Use a dynamic lookup for easier overriding in adapters
       COMBINABLE_ALTER_TABLE_OPS.include?(op[:op])
     end
 
-    # SQL DDL fragment specifying a constraint on a table.
+    # SQL fragment specifying a constraint on a table.
     def constraint_definition_sql(constraint)
-      sql = constraint[:name] ? "CONSTRAINT #{quote_identifier(constraint[:name])} " : ""
+      sql = String.new
+      sql << "CONSTRAINT #{quote_identifier(constraint[:name])} " if constraint[:name] 
       case constraint[:type]
       when :check
         check = constraint[:check]
@@ -570,11 +680,11 @@ module Sequel
         check = "(#{check})" unless check[0..0] == '(' && check[-1..-1] == ')'
         sql << "CHECK #{check}"
       when :primary_key
-        sql << "PRIMARY KEY #{literal(constraint[:columns])}"
+        sql << "#{primary_key_constraint_sql_fragment(constraint)} #{literal(constraint[:columns])}"
       when :foreign_key
         sql << column_references_table_constraint_sql(constraint.merge(:deferrable=>nil))
       when :unique
-        sql << "UNIQUE #{literal(constraint[:columns])}"
+        sql << "#{unique_constraint_sql_fragment(constraint)} #{literal(constraint[:columns])}"
       else
         raise Error, "Invalid constraint type #{constraint[:type]}, should be :check, :primary_key, :foreign_key, or :unique"
       end
@@ -582,7 +692,7 @@ module Sequel
       sql
     end
 
-    # SQL DDL fragment specifying the deferrable constraint attributes.
+    # SQL fragment specifying the deferrable constraint attributes.
     def constraint_deferrable_sql_append(sql, defer)
       case defer
       when nil
@@ -610,14 +720,16 @@ module Sequel
       e = options[:ignore_index_errors] || options[:if_not_exists]
       generator.indexes.each do |index|
         begin
-          index_sql_list(name, [index]).each{|sql| execute_ddl(sql)}
+          transaction(:savepoint=>:only, :skip_transaction=>supports_transactional_ddl? == false) do
+            index_sql_list(name, [index]).each{|sql| execute_ddl(sql)}
+          end
         rescue Error
           raise unless e
         end
       end
     end
 
-    # DDL statement for creating a table with the given name, columns, and options
+    # SQL statement for creating a table with the given name, columns, and options
     def create_table_sql(name, generator, options)
       unless supports_named_column_constraints?
         # Split column constraints into table constraints if they have a name
@@ -636,42 +748,72 @@ module Sequel
           end
         end
       end
+
+      unless can_add_primary_key_constraint_on_nullable_columns?
+        if pk = generator.constraints.find{|op| op[:type] == :primary_key}
+          pk[:columns].each do |column|
+            if matched_column = generator.columns.find{|gc| gc[:name] == column}
+              matched_column[:null] = false
+            end
+          end
+        end
+      end
+
       "#{create_table_prefix_sql(name, options)} (#{column_list_sql(generator)})"
     end
 
-    # Run a command to create the table with the given name from the given
+    # Run SQL statement to create the table with the given name from the given
     # SELECT sql statement.
     def create_table_as(name, sql, options)
       sql = sql.sql if sql.is_a?(Sequel::Dataset)
       run(create_table_as_sql(name, sql, options))
     end
     
-    # DDL statement for creating a table from the result of a SELECT statement.
+    # SQL statement for creating a table from the result of a SELECT statement.
     # +sql+ should be a string representing a SELECT query.
     def create_table_as_sql(name, sql, options)
       "#{create_table_prefix_sql(name, options)} AS #{sql}"
     end
 
-    # DDL fragment for initial part of CREATE TABLE statement
+    # SQL fragment for initial part of CREATE TABLE statement
     def create_table_prefix_sql(name, options)
-      "CREATE #{temporary_table_sql if options[:temp]}TABLE#{' IF NOT EXISTS' if options[:if_not_exists]} #{options[:temp] ? quote_identifier(name) : quote_schema_table(name)}"
+      "CREATE #{temporary_table_sql if options[:temp]}TABLE#{' IF NOT EXISTS' if options[:if_not_exists]} #{create_table_table_name_sql(name, options)}"
     end
 
-    # DDL fragment for initial part of CREATE VIEW statement
+    # The SQL to use for a table name when creating a table.
+    # Use of the :temp option can result in different SQL,
+    # because the rules for temp table naming can differ
+    # between databases, and temp tables should not use the
+    # default_schema.
+    def create_table_table_name_sql(name, options)
+      options[:temp] ? create_table_temp_table_name_sql(name, options) : quote_schema_table(name)
+    end
+
+    # The SQL to use for the table name for a temporary table.
+    def create_table_temp_table_name_sql(name, _options)
+      name.is_a?(String) ? quote_identifier(name) : literal(name)
+    end
+
+    # SQL fragment for initial part of CREATE VIEW statement
     def create_view_prefix_sql(name, options)
       create_view_sql_append_columns("CREATE #{'OR REPLACE 'if options[:replace]}VIEW #{quote_schema_table(name)}", options[:columns])
     end
 
-    # DDL statement for creating a view.
+    # SQL statement for creating a view.
     def create_view_sql(name, source, options)
       source = source.sql if source.is_a?(Dataset)
-      "#{create_view_prefix_sql(name, options)} AS #{source}"
+      sql = String.new
+      sql << "#{create_view_prefix_sql(name, options)} AS #{source}"
+      if check = options[:check]
+        sql << " WITH#{' LOCAL' if check == :local} CHECK OPTION"
+      end
+      sql
     end
 
     # Append the column list to the SQL, if a column list is given.
     def create_view_sql_append_columns(sql, columns)
       if columns
-        sql << ' ('
+        sql += ' ('
         schema_utility_dataset.send(:identifier_list_append, sql, columns)
         sql << ')'
       end
@@ -682,7 +824,7 @@ module Sequel
     # for certain databases.
     def default_index_name(table_name, columns)
       schema, table = schema_and_table(table_name)
-      "#{"#{schema}_" if schema}#{table}_#{columns.map{|c| [String, Symbol].any?{|cl| c.is_a?(cl)} ? c : literal(c).gsub(/\W/, '_')}.join(UNDERSCORE)}_index"
+      "#{"#{schema}_" if schema}#{table}_#{columns.map{|c| [String, Symbol].any?{|cl| c.is_a?(cl)} ? c : literal(c).gsub(/\W/, '_')}.join('_')}_index"
     end
   
     # Get foreign key name for given table and columns.
@@ -704,15 +846,29 @@ module Sequel
     
     # SQL DDL statement to drop a view with the given name.
     def drop_view_sql(name, options)
-      "DROP VIEW #{quote_schema_table(name)}#{' CASCADE' if options[:cascade]}"
+      "DROP VIEW#{' IF EXISTS' if options[:if_exists]} #{quote_schema_table(name)}#{' CASCADE' if options[:cascade]}"
     end
 
     # Proxy the filter_expr call to the dataset, used for creating constraints.
-    def filter_expr(*args, &block)
-      schema_utility_dataset.literal(schema_utility_dataset.send(:filter_expr, *args, &block))
+    # Support passing Proc arguments as blocks, as well as treating plain strings
+    # as literal strings, so that previous migrations that used this API do not break.
+    def filter_expr(arg=nil, &block)
+      if arg.is_a?(Proc) && !block
+        block = arg
+        arg = nil
+      elsif arg.is_a?(String)
+        arg = Sequel.lit(arg)
+      elsif arg.is_a?(Array)
+        if arg.first.is_a?(String)
+          arg = Sequel.lit(*arg)
+        elsif arg.length > 1
+          arg = Sequel.&(*arg)
+        end
+      end
+      schema_utility_dataset.literal(schema_utility_dataset.send(:filter_expr, arg, &block))
     end
 
-    # SQL DDL statement for creating an index for the table with the given name
+    # SQL statement for creating an index for the table with the given name
     # and index specifications.
     def index_definition_sql(table_name, index)
       index_name = index[:name] || default_index_name(table_name, index[:columns])
@@ -721,7 +877,7 @@ module Sequel
       "CREATE #{'UNIQUE ' if index[:unique]}INDEX #{quote_identifier(index_name)} ON #{quote_schema_table(table_name)} #{literal(index[:columns])}#{" WHERE #{filter_expr(index[:where])}" if index[:where]}"
     end
   
-    # Array of SQL DDL statements, one for each index specification,
+    # Array of SQL statements, one for each index specification,
     # for the given table.
     def index_sql_list(table_name, indexes)
       indexes.map{|i| index_definition_sql(table_name, i)}
@@ -736,7 +892,7 @@ module Sequel
         options[:name]
       else
         table_names = entries.map{|e| join_table_name_extract(e)}
-        table_names.map{|t| t.to_s}.sort.join('_')
+        table_names.map(&:to_s).sort.join('_')
       end
     end
 
@@ -753,20 +909,21 @@ module Sequel
       end
     end
     
-    # SQL DDL ON DELETE fragment to use, based on the given action.
+    # SQL fragment to use for ON DELETE, based on the given action.
     # The following actions are recognized:
     # 
-    # * :cascade - Delete rows referencing this row.
-    # * :no_action (default) - Raise an error if other rows reference this
-    #   row, allow deferring of the integrity check.
-    # * :restrict - Raise an error if other rows reference this row,
-    #   but do not allow deferring the integrity check.
-    # * :set_default - Set columns referencing this row to their default value.
-    # * :set_null - Set columns referencing this row to NULL.
+    # :cascade :: Delete rows referencing this row.
+    # :no_action :: Raise an error if other rows reference this
+    #               row, allow deferring of the integrity check.
+    #               This is the default.
+    # :restrict :: Raise an error if other rows reference this row,
+    #              but do not allow deferring the integrity check.
+    # :set_default :: Set columns referencing this row to their default value.
+    # :set_null :: Set columns referencing this row to NULL.
     #
     # Any other object given is just converted to a string, with "_" converted to " " and upcased.
     def on_delete_clause(action)
-      action.to_s.gsub("_", " ").upcase
+      action.to_s.tr("_", " ").upcase
     end
 
     # Alias of #on_delete_clause, since the two usually behave the same.
@@ -774,12 +931,17 @@ module Sequel
       on_delete_clause(action)
     end
     
+    # Add fragment for primary key specification, separated for easier overridding.
+    def primary_key_constraint_sql_fragment(_)
+      'PRIMARY KEY'
+    end
+    
     # Proxy the quote_schema_table method to the dataset
     def quote_schema_table(table)
       schema_utility_dataset.quote_schema_table(table)
     end
     
-    # SQL DDL statement for renaming a table.
+    # SQL statement for renaming a table.
     def rename_table_sql(name, new_name)
       "ALTER TABLE #{quote_schema_table(name)} RENAME TO #{quote_schema_table(new_name)}"
     end
@@ -791,7 +953,7 @@ module Sequel
 
     # Return true if the given column schema represents an autoincrementing primary key.
     def schema_autoincrementing_primary_key?(schema)
-      !!(schema[:primary_key] && schema[:db_type] =~ /int/io)
+      !!(schema[:primary_key] && schema[:auto_increment])
     end
 
     # The dataset to use for proxying certain schema methods.
@@ -804,14 +966,21 @@ module Sequel
       schema_utility_dataset.split_qualifiers(table_name)
     end
 
-    # SQL DDL fragment for temporary table
+    # SQL fragment for temporary table
     def temporary_table_sql
-      self.class.const_get(:TEMPORARY)
+      'TEMPORARY '
     end
 
     # SQL fragment specifying the type of a given column.
     def type_literal(column)
-      column[:type].is_a?(Class) ? type_literal_generic(column) : type_literal_specific(column)
+      case column[:type]
+      when Class
+        type_literal_generic(column)
+      when :Bignum
+        type_literal_generic_bignum_symbol(column)
+      else
+        type_literal_specific(column)
+      end
     end
     
     # SQL fragment specifying the full type of a column,
@@ -819,6 +988,7 @@ module Sequel
     def type_literal_generic(column)
       meth = "type_literal_generic_#{column[:type].name.to_s.downcase}"
       if respond_to?(meth, true)
+        # Allow calling private methods as per type literal generic methods are private
         send(meth, column)
       else
         raise Error, "Unsupported ruby class used as database type: #{column[:type]}"
@@ -830,8 +1000,8 @@ module Sequel
       type_literal_generic_numeric(column)
     end
 
-    # Sequel uses the bigint type by default for Bignums.
-    def type_literal_generic_bignum(column)
+    # Sequel uses the bigint type by default for :Bignum symbol.
+    def type_literal_generic_bignum_symbol(column)
       :bigint
     end
 
@@ -894,7 +1064,16 @@ module Sequel
     # Sequel uses the timestamp type by default for Time values.
     # If the :only_time option is used, the time type is used.
     def type_literal_generic_time(column)
-      column[:only_time] ? :time : :timestamp
+      if column[:only_time]
+        type_literal_generic_only_time(column)
+      else
+        type_literal_generic_datetime(column)
+      end
+    end
+
+    # Use time by default for Time values if :only_time option is used.
+    def type_literal_generic_only_time(column)
+      :time
     end
 
     # Sequel uses the boolean type by default for TrueClass and FalseClass.
@@ -909,10 +1088,15 @@ module Sequel
       type = "double precision" if type.to_s == 'double'
       column[:size] ||= default_string_column_size if type.to_s == 'varchar'
       elements = column[:size] || column[:elements]
-      "#{type}#{literal(Array(elements)) if elements}#{UNSIGNED if column[:unsigned]}"
+      "#{type}#{literal(Array(elements)) if elements}#{' UNSIGNED' if column[:unsigned]}"
     end
 
-    # Whether clob should be used for String :text=>true columns.
+    # Add fragment for unique specification, separated for easier overridding.
+    def unique_constraint_sql_fragment(_)
+      'UNIQUE'
+    end
+    
+    # Whether clob should be used for String text: true columns.
     def uses_clob_for_text?
       false
     end

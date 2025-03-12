@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # This _pretty_table extension is only for internal use.
 # It adds the Sequel::PrettyTable class without modifying 
 # Sequel::Dataset.
@@ -5,7 +7,10 @@
 # To load the extension:
 #
 #   Sequel.extension :_pretty_table
+#
+# Related module: Sequel::PrettyTable
 
+#
 module Sequel
   module PrettyTable
     # Prints nice-looking plain-text tables via puts
@@ -22,7 +27,7 @@ module Sequel
 
     # Return the string that #print will print via puts.
     def self.string(records, columns = nil) # records is an array of hashes
-      columns ||= records.first.keys.sort_by{|x|x.to_s}
+      columns ||= records.first.keys.sort
       sizes = column_sizes(records, columns)
       sep_line = separator_line(columns, sizes)
 
@@ -32,14 +37,11 @@ module Sequel
       array.join("\n")
     end
 
-    ### Private Module Methods ###
-
     # Hash of the maximum size of the value for each column 
     def self.column_sizes(records, columns) # :nodoc:
-      sizes = Hash.new {0}
+      sizes = Hash.new(0)
       columns.each do |c|
-        s = c.to_s.size
-        sizes[c] = s if s > sizes[c]
+        sizes[c] = c.to_s.size
       end
       records.each do |r|
         columns.each do |c|
@@ -52,13 +54,13 @@ module Sequel
     
     # String for each data line
     def self.data_line(columns, sizes, record) # :nodoc:
-      '|' << columns.map {|c| format_cell(sizes[c], record[c])}.join('|') << '|'
+      String.new << '|' << columns.map {|c| format_cell(sizes[c], record[c])}.join('|') << '|'
     end
     
     # Format the value so it takes up exactly size characters
     def self.format_cell(size, v) # :nodoc:
       case v
-      when Bignum, Fixnum
+      when Integer
         "%#{size}d" % v
       when Float, BigDecimal
         "%#{size}g" % v
@@ -69,12 +71,12 @@ module Sequel
     
     # String for header line
     def self.header_line(columns, sizes) # :nodoc:
-      '|' << columns.map {|c| "%-#{sizes[c]}s" % c.to_s}.join('|') << '|'
+      String.new << '|' << columns.map {|c| "%-#{sizes[c]}s" % c.to_s}.join('|') << '|'
     end
 
     # String for separtor line
     def self.separator_line(columns, sizes) # :nodoc:
-      '+' << columns.map {|c| '-' * sizes[c]}.join('+') << '+'
+      String.new << '+' << columns.map {|c| '-' * sizes[c]}.join('+') << '+'
     end
 
     private_class_method :column_sizes, :data_line, :format_cell, :header_line, :separator_line

@@ -1,9 +1,8 @@
+# frozen-string-literal: true
+
 module Sequel
   class Dataset
     module Replace
-      INSERT = Dataset::INSERT
-      REPLACE = 'REPLACE'.freeze
-
       # Execute a REPLACE statement on the database (deletes any duplicate
       # rows before inserting).
       def replace(*values)
@@ -29,7 +28,7 @@ module Sequel
 
       # If this is an replace instead of an insert, use replace instead
       def insert_insert_sql(sql)
-        sql << (@opts[:replace] ? REPLACE : INSERT)
+        sql << (@opts[:replace] ? 'REPLACE' : 'INSERT')
       end
     end
   end

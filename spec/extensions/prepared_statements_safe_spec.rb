@@ -1,4 +1,4 @@
-require File.join(File.dirname(File.expand_path(__FILE__)), "spec_helper")
+require_relative "spec_helper"
 
 describe "prepared_statements_safe plugin" do
   before do
@@ -11,51 +11,69 @@ describe "prepared_statements_safe plugin" do
     @db.sqls
   end
 
-  specify "should load the prepared_statements plugin" do
-    @c.plugins.should include(Sequel::Plugins::PreparedStatements)
+  it "should load the prepared_statements plugin" do
+    @c.plugins.must_include(Sequel::Plugins::PreparedStatements)
   end
 
-  specify "should set default values correctly" do
-    @c.prepared_statements_column_defaults.should == {:name=>nil, :i=>nil}
-    @c.instance_variable_set(:@db_schema, {:i=>{:default=>'f(x)'}, :name=>{:ruby_default=>'foo'}, :id=>{:primary_key=>true}})
-    Class.new(@c).prepared_statements_column_defaults.should == {:name=>'foo'}
+  it "should set default values correctly" do
+    @c.prepared_statements_column_defaults.must_equal(:name=>nil, :i=>nil)
+    @c.instance_variable_set(:@db_schema, {:i=>{:default=>'f(x)'}, :name=>{:ruby_default=>'foo'}, :id=>{:primary_key=>true}, :bar=>{:ruby_default=>Sequel::CURRENT_TIMESTAMP}})
+    Class.new(@c).prepared_statements_column_defaults.must_equal(:name=>'foo')
   end
 
-  specify "should set default values when creating" do
+  it "should set default values when creating" do
     @c.create
-    @db.sqls.first.should =~ /INSERT INTO people \((i|name), (i|name)\) VALUES \(NULL, NULL\)/
+    @db.sqls.must_equal ['INSERT INTO people (i, name) VALUES (NULL, NULL)', "SELECT * FROM people WHERE (id = 1) LIMIT 1"]
     @c.create(:name=>'foo')
-    @db.sqls.first.should =~ /INSERT INTO people \((i|name), (i|name)\) VALUES \((NULL|'foo'), (NULL|'foo')\)/
+    @db.sqls.must_equal ["INSERT INTO people (i, name) VALUES (NULL, 'foo')", "SELECT * FROM people WHERE (id = 1) LIMIT 1"]
     @c.create(:name=>'foo', :i=>2)
-    @db.sqls.first.should =~ /INSERT INTO people \((i|name), (i|name)\) VALUES \((2|'foo'), (2|'foo')\)/
+    @db.sqls.must_equal ["INSERT INTO people (i, name) VALUES (2, 'foo')", "SELECT * FROM people WHERE (id = 1) LIMIT 1"]
   end 
 
-  specify "should use database default values" do
+  it "should use database default values" do
     @c.instance_variable_set(:@db_schema, {:i=>{:ruby_default=>2}, :name=>{:ruby_default=>'foo'}, :id=>{:primary_key=>true}})
     c = Class.new(@c)
     c.create
-    @db.sqls.first.should =~ /INSERT INTO people \((i|name), (i|name)\) VALUES \((2|'foo'), (2|'foo')\)/
+    @db.sqls.must_equal ["INSERT INTO people (i, name) VALUES (2, 'foo')", "SELECT * FROM people WHERE (id = 1) LIMIT 1"]
   end
 
-  specify "should not set defaults for unparseable dataset default values" do
+  it "should not set defaults for unparseable dataset default values" do
     @c.instance_variable_set(:@db_schema, {:i=>{:default=>'f(x)'}, :name=>{:ruby_default=>'foo'}, :id=>{:primary_key=>true}})
     c = Class.new(@c)
     c.create
-    @db.sqls.first.should == "INSERT INTO people (name) VALUES ('foo')"
+    @db.sqls.must_equal ["INSERT INTO people (name) VALUES ('foo')", "SELECT * FROM people WHERE (id = 1) LIMIT 1"]
   end
 
-  specify "should save all fields when updating" do
+  it "should save all fields when updating" do
     @p.update(:i=>3)
-    @db.sqls.first.should =~ /UPDATE people SET (name = 'foo'|i = 3), (name = 'foo'|i = 3) WHERE \(id = 1\)/
+    @db.sqls.must_equal ["UPDATE people SET name = 'foo', i = 3 WHERE (id = 1)"]
   end
 
-  specify "should work with abstract classes" do
+  it "should have save_changes return nil without saving if the object has not been modified" do
+    @p.save_changes.must_be_nil
+    @db.sqls.must_equal []
+  end
+
+  it "should work with abstract classes" do
     c = Class.new(Sequel::Model)
     c.plugin :prepared_statements_safe
     c1 = Class.new(c)
-    c1.meta_def(:get_db_schema){@db_schema = {:i=>{:default=>'f(x)'}, :name=>{:ruby_default=>'foo'}, :id=>{:primary_key=>true}}}
+    def c1.get_db_schema; @db_schema = {:i=>{:default=>'f(x)'}, :name=>{:ruby_default=>'foo'}, :id=>{:primary_key=>true}} end
+    c1.singleton_class.send(:private, :get_db_schema)
     c1.set_dataset(:people)
-    c1.prepared_statements_column_defaults.should == {:name=>'foo'}
-    Class.new(c1).prepared_statements_column_defaults.should == {:name=>'foo'}
+    c1.prepared_statements_column_defaults.must_equal(:name=>'foo')
+    Class.new(c1).prepared_statements_column_defaults.must_equal(:name=>'foo')
+  end
+
+  it "should freeze prepared statement column defaults when freezing model class" do
+    @c.freeze
+    @c.prepared_statements_column_defaults.frozen?.must_equal true
+  end
+
+  it "should handle freezing a class without a dataset" do
+    c = Class.new(Sequel::Model)
+    c.plugin :prepared_statements_safe
+    c.freeze
+    c.prepared_statements_column_defaults.must_be_nil
   end
 end

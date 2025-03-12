@@ -1,38 +1,49 @@
-Sequel.require 'adapters/shared/db2'
-Sequel.require 'adapters/jdbc/transactions'
+# frozen-string-literal: true
+
+Sequel::JDBC.load_driver('Java::ComIbmDb2Jcc::DB2Driver')
+require_relative '../shared/db2'
+require_relative 'transactions'
 
 module Sequel
   module JDBC
-    class Database
-      # Alias the generic JDBC versions so they can be called directly later
-      alias jdbc_schema_parse_table schema_parse_table
-      alias jdbc_tables tables
-      alias jdbc_views views
-      alias jdbc_indexes indexes
-    end
-    
-    # Database and Dataset instance methods for DB2 specific
-    # support via JDBC.
-    module DB2
-      # Database instance methods for DB2 databases accessed via JDBC.
-      module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
-        PRIMARY_KEY_INDEX_RE = /\Asql\d+\z/i.freeze
+    Sequel.synchronize do
+      DATABASE_SETUP[:db2] = proc do |db|
+        db.singleton_class.class_eval do
+          alias jdbc_schema_parse_table schema_parse_table
+          alias jdbc_tables tables
+          alias jdbc_views views
+          alias jdbc_indexes indexes
 
+          include Sequel::JDBC::DB2::DatabaseMethods
+
+          alias schema_parse_table jdbc_schema_parse_table
+          alias tables jdbc_tables
+          alias views jdbc_views
+          alias indexes jdbc_indexes
+          %w'schema_parse_table tables views indexes'.each do |s|
+            remove_method(:"jdbc_#{s}")
+          end
+        end
+        db.extend_datasets Sequel::DB2::DatasetMethods
+        Java::ComIbmDb2Jcc::DB2Driver
+      end
+    end
+
+    module DB2
+      module DatabaseMethods
         include Sequel::DB2::DatabaseMethods
         include Sequel::JDBC::Transactions
-        IDENTITY_VAL_LOCAL = "SELECT IDENTITY_VAL_LOCAL() FROM SYSIBM.SYSDUMMY1".freeze
-        
-        %w'schema_parse_table tables views indexes'.each do |s|
-          class_eval("def #{s}(*a) jdbc_#{s}(*a) end", __FILE__, __LINE__)
-        end
 
         private
 
         def set_ps_arg(cps, arg, i)
           case arg
           when Sequel::SQL::Blob
-            cps.setString(i, arg)
+            if use_clob_as_blob
+              cps.setString(i, arg)
+            else
+              super
+            end
           else
             super
           end
@@ -40,37 +51,30 @@ module Sequel
         
         def last_insert_id(conn, opts=OPTS)
           statement(conn) do |stmt|
-            sql = IDENTITY_VAL_LOCAL
-            rs = log_yield(sql){stmt.executeQuery(sql)}
+            sql = "SELECT IDENTITY_VAL_LOCAL() FROM SYSIBM.SYSDUMMY1"
+            rs = log_connection_yield(sql, conn){stmt.executeQuery(sql)}
             rs.next
-            rs.getInt(1)
+            rs.getLong(1)
           end
         end
         
         # Primary key indexes appear to be named sqlNNNN on DB2
         def primary_key_index_re
-          PRIMARY_KEY_INDEX_RE
-        end
-      end
-
-      class Dataset < JDBC::Dataset
-        include Sequel::DB2::DatasetMethods
-
-        class ::Sequel::JDBC::Dataset::TYPE_TRANSLATOR
-          def db2_clob(v) Sequel::SQL::Blob.new(v.getSubString(1, v.length)) end
+          /\Asql\d+\z/i
         end
 
-        DB2_CLOB_METHOD = TYPE_TRANSLATOR_INSTANCE.method(:db2_clob)
-      
-        private
+        def setup_type_convertor_map
+          super
+          map = @type_convertor_map
+          types = Java::JavaSQL::Types
+          map[types::NCLOB] = map[types::CLOB] = method(:convert_clob)
+        end
 
-        # Return clob as blob if use_clob_as_blob is true
-        def convert_type_proc(v)
-          case v
-          when JAVA_SQL_CLOB
-            ::Sequel::DB2::use_clob_as_blob ? DB2_CLOB_METHOD : super
-          else
-            super
+        def convert_clob(r, i)
+          if v = r.getClob(i)
+            v = v.getSubString(1, v.length)
+            v = Sequel::SQL::Blob.new(v) if use_clob_as_blob
+            v
           end
         end
       end

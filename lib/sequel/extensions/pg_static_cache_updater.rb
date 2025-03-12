@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The pg_static_cache_updater extension is designed to
 # automatically update the caches in the models using the
 # static_cache plugin when changes to the underlying tables
@@ -61,7 +63,10 @@
 #   with the pg driver (the model classes do not have to
 #   use the same Database).
 # * Must be using a thread-safe connection pool (the default).
+#
+# Related module: Sequel::Postgres::StaticCacheUpdater
 
+#
 module Sequel
   module Postgres
     module StaticCacheUpdater
@@ -98,15 +103,17 @@ SQL
       end
 
       # Listen on the notification channel for changes to any of tables for
-      # the models given. If notified about a change to one of the tables,
+      # the models given in a new thread. If notified about a change to one of the tables,
       # reload the cache for the related model.  Options given are also
       # passed to Database#listen.
       #
-      # Note that this implementation does not currently support model
+      # Note that this implementation does not currently support multiple
       # models that use the same underlying table.
       #
       # Options:
       # :channel_name :: Override the channel name to use.
+      # :before_thread_exit :: An object that responds to +call+ that is called before the 
+      #                        the created thread exits.
       def listen_for_static_cache_updates(models, opts=OPTS)
         raise Error, "this database object does not respond to listen, use the postgres adapter with the pg driver" unless respond_to?(:listen)
         models = [models] unless models.is_a?(Array)
@@ -114,15 +121,19 @@ SQL
 
         oid_map = {}
         models.each do |model|
-          raise Error, "#{model.inspect} does not use the static_cache plugin" unless model.respond_to?(:load_cache, true)
+          raise Error, "#{model.inspect} does not use the static_cache plugin" unless model.respond_to?(:load_cache)
           oid_map[get(regclass_oid(model.dataset.first_source_table))] = model
         end
 
         Thread.new do
-          listen(opts[:channel_name]||default_static_cache_update_name, {:loop=>true}.merge(opts)) do |_, _, oid|
-            if model = oid_map[oid.to_i]
-              model.send(:load_cache)
+          begin
+            listen(opts[:channel_name]||default_static_cache_update_name, {:loop=>true}.merge!(opts)) do |_, _, oid|
+              if model = oid_map[oid.to_i]
+                model.load_cache
+              end
             end
+          ensure
+            opts[:before_thread_exit].call if opts[:before_thread_exit]
           end
         end
       end

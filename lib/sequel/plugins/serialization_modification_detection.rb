@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   module Plugins
     # This plugin extends the serialization plugin and enables it to detect
@@ -20,7 +22,7 @@ module Sequel
     #     plugin :serialization, :json, :permissions
     #     plugin :serialization_modification_detection
     #   end
-    #   user = User.create(:permissions => {})
+    #   user = User.create(permissions: {})
     #   user.permissions[:global] = 'read-only'
     #   user.save_changes
     module SerializationModificationDetection
@@ -45,23 +47,24 @@ module Sequel
           cc
         end
 
-        # Duplicate the original deserialized values when duplicating instance.
-        def dup
-          o = @original_deserialized_values
-          super.instance_eval do
-            @original_deserialized_values = o.dup if o
-            self
-          end
-        end
-
         # Freeze the original deserialized values when freezing the instance.
         def freeze
           @original_deserialized_values ||= {}
-          @original_deserialized_values.freeze
           super
+          @original_deserialized_values.freeze
+          self
         end
 
         private
+
+        # Duplicate the original deserialized values when duplicating instance.
+        def initialize_copy(other)
+          super
+          if o = other.instance_variable_get(:@original_deserialized_values)
+            @original_deserialized_values = Hash[o]
+          end
+          self
+        end
 
         # For new objects, serialize any existing deserialized values so that changes can
         # be detected.

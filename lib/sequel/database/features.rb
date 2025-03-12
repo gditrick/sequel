@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+
 module Sequel
   class Database
     # ---------------------
@@ -6,7 +8,7 @@ module Sequel
     # database supprots a given feature.
     # ---------------------
     
-    # Whether the database uses a global namespace for the index.  If
+    # Whether the database uses a global namespace for the index, true by default.  If
     # false, the indexes are going to be namespaced per table.
     def global_index_namespace?
       true
@@ -31,7 +33,7 @@ module Sequel
     end
 
     # Whether the database supports DROP TABLE IF EXISTS syntax,
-    # default is the same as #supports_create_table_if_not_exists?.
+    # false by default.
     def supports_drop_table_if_exists?
       supports_create_table_if_not_exists?
     end
@@ -47,7 +49,8 @@ module Sequel
       respond_to?(:indexes)
     end
 
-    # Whether the database supports partial indexes (indexes on a subset of a table).
+    # Whether the database supports partial indexes (indexes on a subset of a table),
+    # false by default.
     def supports_partial_indexes?
       false
     end
@@ -64,7 +67,7 @@ module Sequel
     end
 
     # Whether the database and adapter support savepoints inside prepared transactions
-    # (two-phase commit), default is false.
+    # (two-phase commit), false by default.
     def supports_savepoints_in_prepared_transactions?
       supports_prepared_transactions? && supports_savepoints?
     end
@@ -94,8 +97,31 @@ module Sequel
       false
     end
 
+    # Whether CREATE VIEW ... WITH CHECK OPTION is supported, false by default.
+    def supports_views_with_check_option?
+      !!view_with_check_option_support
+    end
+
+    # Whether CREATE VIEW ... WITH LOCAL CHECK OPTION is supported, false by default.
+    def supports_views_with_local_check_option?
+      view_with_check_option_support == :local
+    end
+
     private
 
+    # Whether the database supports adding primary key constraints on NULLable columns,
+    # automatically making them NOT NULL.  If false, the columns must be set NOT NULL
+    # before the primary key constraint is added.
+    def can_add_primary_key_constraint_on_nullable_columns?
+      true
+    end
+
+    # Whether this dataset considers unquoted identifiers as uppercase. True
+    # by default as that is the SQL standard
+    def folds_unquoted_identifiers_to_uppercase?
+      true
+    end
+    
     # Whether the database supports combining multiple alter table
     # operations into a single query, false by default.
     def supports_combining_alter_table_ops?
@@ -114,6 +140,11 @@ module Sequel
     # if the column constraints have names.
     def supports_named_column_constraints?
       true
+    end
+
+    # Don't advertise support for WITH CHECK OPTION by default.
+    def view_with_check_option_support
+      nil
     end
   end
 end

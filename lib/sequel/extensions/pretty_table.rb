@@ -1,3 +1,5 @@
+# frozen-string-literal: true
+#
 # The pretty_table extension adds Sequel::Dataset#print and the
 # Sequel::PrettyTable class for creating nice-looking plain-text
 # tables.  Example:
@@ -18,7 +20,10 @@
 # is probably the desired behavior if you are using this extension:
 #
 #   DB.extension(:pretty_table)
+#
+# Related module: Sequel::DatasetPrinter
 
+#
 module Sequel
   extension :_pretty_table
 

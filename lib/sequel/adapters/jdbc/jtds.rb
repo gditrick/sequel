@@ -1,12 +1,21 @@
-Sequel.require 'adapters/jdbc/mssql'
+# frozen-string-literal: true
+
+Sequel::JDBC.load_driver('Java::NetSourceforgeJtdsJdbc::Driver', :JTDS)
+require_relative 'mssql'
 
 module Sequel
   module JDBC
-    # Database and Dataset instance methods for JTDS specific
-    # support via JDBC.
+    Sequel.synchronize do
+      DATABASE_SETUP[:jtds] = proc do |db|
+        db.extend(Sequel::JDBC::JTDS::DatabaseMethods)
+        db.extend_datasets Sequel::MSSQL::DatasetMethods
+        db.send(:set_mssql_unicode_strings)
+        Java::NetSourceforgeJtdsJdbc::Driver
+      end
+    end
+
     module JTDS
       module DatabaseMethods
-        extend Sequel::Database::ResetIdentifierMangling
         include Sequel::JDBC::MSSQL::DatabaseMethods
 
         private
@@ -16,29 +25,13 @@ module Sequel
           false
         end
 
+        def disconnect_error?(exception, opts)
+          super || exception.message =~ /\AInvalid state, the Connection object is closed\.\z/
+        end
+
         # Handle nil values by using setNull with the correct parameter type.
         def set_ps_arg_nil(cps, i)
           cps.setNull(i, cps.getParameterMetaData.getParameterType(i))
-        end
-      end
-
-      # Dataset class for JTDS datasets accessed via JDBC.
-      class Dataset < JDBC::Dataset
-        include Sequel::MSSQL::DatasetMethods
-
-        class ::Sequel::JDBC::Dataset::TYPE_TRANSLATOR
-          def jtds_clob(v) v.getSubString(1, v.length) end
-        end
-
-        JTDS_CLOB_METHOD = TYPE_TRANSLATOR_INSTANCE.method(:jtds_clob)
-      
-        # Handle CLOB types retrieved via JTDS.
-        def convert_type_proc(v)
-          if v.is_a?(Java::NetSourceforgeJtdsJdbc::ClobImpl)
-            JTDS_CLOB_METHOD
-          else
-            super
-          end
         end
       end
     end

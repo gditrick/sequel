@@ -16,13 +16,13 @@ database tables.  Without associations, if you had classes such as:
 And you wanted to get all of the albums for a given artist (assuming each
 album was associated with only one artist):
 
-  Album.filter(:artist_id=>@artist.id).all
+  Album.where(artist_id: @artist.id).all
   
 Or maybe you want to add an album for a given artist:
 
-  Album.create(:artist_id=>@artist.id, :name=>'RF')
+  Album.create(artist_id: @artist.id, name: 'RF')
 
-With Associations, you can make the above code simpler, by setting up associations
+With associations, you can make the above code simpler, by setting up associations
 between the two models:
   
   class Artist < Sequel::Model
@@ -39,23 +39,32 @@ Then, the code to retrieve albums related to the artist is simpler:
   
 As is the code to add a related album to an artist:
 
-  @artist.add_album(:name=>'RF')
+  @artist.add_album(name: 'RF')
+
+It also makes it easier to create queries that use joins based on the association:
+
+  Artist.association_join(:albums)
+  # SELECT * FROM artists
+  # INNER JOIN albums ON (albums.artist_id = artists.id)
 
 == The Types of Associations
 
-Sequel has four different association types built in:
+Sequel has five different association types built in:
 
 * many_to_one
 * one_to_many
 * one_to_one
 * many_to_many
+* one_through_one
+
+It ships with additional association types via plugins.
 
 === many_to_one
 
 The many_to_one association is used when the table for the current class
 contains a foreign key that references the primary key in the table for the
-associated class.  It is named because there can be many rows in the current
-table for each row in the associated table.
+associated class.  It is named 'many_to_one' because there can be many rows
+in the current table for each row in the associated table.
 
   # Database schema:
   #  albums             artists
@@ -68,12 +77,18 @@ table for each row in the associated table.
     many_to_one :artist
   end
 
-=== one_to_many
+=== one_to_many and one_to_one
 
 The one_to_many association is used when the table for the associated class
 contains a foreign key that references the primary key in the table for the
-current class.  It is named because for each row in the current table there
-can be many rows in the associated table:
+current class.  It is named 'one_to_many' because for each row in the
+current table there can be many rows in the associated table:
+
+The one_to_one association can be thought of as a subset of the one_to_many association,
+but where there can only be either 0 or 1 records in the associated table.  This is
+useful if there is a unique constraint on the foreign key field in the associated table.
+It's also useful if you want to impose an order on the association and just want the
+first record returned.
 
   # Database schema:
   #  artists            albums
@@ -84,33 +99,24 @@ can be many rows in the associated table:
   class Artist
     # Uses plural form of associated model name
     one_to_many :albums
-  end
 
-=== one_to_one
-
-The one_to_one association can be thought of as a subset of the one_to_many association,
-but where there can only be either 0 or 1 records in the associated table.
-It is the least frequently used of the four associations.  If you assume
-each artist cannot be associated with more than one album:
-
-  # Database schema:
-  #  artists            albums
-  #   :id   <----\       :id
-  #   :name       \----- :artist_id 
-  #                      :name
-
-  class Artist
     # Uses singular form of associated model name
     one_to_one :album
   end
-  
-=== many_to_many
+
+=== many_to_many and one_through_one
 
 The many_to_many association allows each row in the current table to be associated
 to many rows in the associated table, and each row in the associated table to
 many rows in the current table, by using a join table to associate the two tables.
-If you assume each artist can have multiple albums and each album can have multiple
-artists:
+
+The one_through_one association can be thought of as a subset of the many_to_many
+association, but where there can only be 0 or 1 records in the associated table.
+This is useful if there is a unique constraint on the foreign key in the join table
+that references the current table.  It's also useful if you want to impose an order
+on the association and just want the first record returned.  The one_through_one
+association is so named because it sets up a one-to-one association through a
+single join table.
 
   # Database schema:
   #  albums 
@@ -124,14 +130,15 @@ artists:
   class Artist
     # Uses plural form of associated model name
     many_to_many :albums
-  end
-  class Album
-    many_to_many :artists
+
+    # Uses singular form of associated model name
+    one_through_one :album
   end
 
 === Differences Between many_to_one and one_to_one
 
-If you want to setup a 1-1 relationship between two models, you have to use
+If you want to setup a 1-1 relationship between two models, where the
+foreign key in one table references the associated table directly, you have to use
 many_to_one in one model, and one_to_one in the other model.  How do you
 know which to use in which model?
 
@@ -179,10 +186,10 @@ Then the default :key option will not be correct.  To fix this, you need to
 specify an explicit :key option:
 
   class Album
-    many_to_one :artist, :key=>:artistid
+    many_to_one :artist, key: :artistid
   end
   class Artist
-    one_to_many :albumst, :key=>:artistid
+    one_to_many :albums, key: :artistid
   end
   
 For many_to_many associations, the :left_key and :right_key options can be
@@ -202,17 +209,17 @@ option can be used to specify the name of the join table:
     # Note that :left_key refers to the foreign key pointing to the
     # current table, and :right_key the foreign key pointing to the
     # associated table.
-    many_to_many :albums, :left_key=>:artistid, :right_key=>:albumid,
-      :join_table=>:albumsartists
+    many_to_many :albums, left_key: :artistid, right_key: :albumid,
+      join_table: :albumsartists
   end
   class Album
-    many_to_many :artists, :left_key=>:albumid, :right_key=>:artistid,
-      :join_table=>:albumsartists
+    many_to_many :artists, left_key: :albumid, right_key: :artistid,
+      join_table: :albumsartists
   end
 
 === :class
 
-If the class of the association can not be guessed directly by looking at
+If the class of the association cannot be guessed directly by looking at
 the association name, you need to specify it via the :class option.  For
 example, if you have two separate foreign keys in the albums table that
 both point to the artists table, maybe to indicate one artist is the
@@ -226,12 +233,12 @@ vocalist and one is the composer, you'd have to use the :class option:
   #                      :name
   
   class Album
-    many_to_one :vocalist, :class=>:Artist
-    many_to_one :composer, :class=>:Artist
+    many_to_one :vocalist, class: :Artist
+    many_to_one :composer, class: :Artist
   end
   class Artist
-    one_to_many :vocalist_albums, :class=>:Album, :key=>:vocalist_id
-    one_to_many :composer_albums, :class=>:Album, :key=>:composer_id
+    one_to_many :vocalist_albums, class: :Album, key: :vocalist_id
+    one_to_many :composer_albums, class: :Album, key: :composer_id
   end
 
 == Self-referential Associations
@@ -246,8 +253,8 @@ example is a tree structure:
   #   :name
   
   class Node
-    many_to_one :parent, :class=>self
-    one_to_many :children, :key=>:parent_id, :class=>self
+    many_to_one :parent, class: self
+    one_to_many :children, key: :parent_id, class: self
   end
 
 For many_to_many self_referential associations, it's fairly similar.  Here's
@@ -259,10 +266,10 @@ an example of a directed graph:
   #   :name       \----- :predecessor_id
 
   class Node
-    many_to_many :direct_successors, :left_key=>:successor_id,
-      :right_key=>:predecessor_id, :join_table=>:edges, :class=>self
-    many_to_many :direct_predecessors, :right_key=>:successor_id,
-      :left_key=>:predecessor_id, :join_table=>:edges, :class=>self
+    many_to_many :direct_predecessors, left_key: :successor_id,
+      right_key: :predecessor_id, join_table: :edges, class: self
+    many_to_many :direct_successors, right_key: :successor_id,
+      left_key: :predecessor_id, join_table: :edges, class: self
   end
 
 == Methods Added
@@ -279,19 +286,28 @@ same name as the association:
 many_to_one and one_to_one associations will also have a setter method
 added to change the associated object:
 
-  @album.artist = Artist.create(:name=>'YJM')
+  @album.artist = Artist.create(name: 'YJM')
 
 many_to_many and one_to_many associations will have three methods added:
 
-- add_* to associate an object to the current object
-- remove_* to disassociate an object from the current object
-- remove_all_* to dissociate all currently associated objects
+add_* :: to associate an object to the current object
+remove_* :: to disassociate an object from the current object
+remove_all_* :: to dissociate all currently associated objects
 
 Examples:
 
   @artist.add_album(@album)
   @artist.remove_album(@album)
   @artist.remove_all_albums
+
+Note that the remove_all_* method does not call remove hooks defined on
+the association, it just issues a single query to the database.  If you
+want to remove all associated objects and call remove hooks, iterate
+over the array of associated objects and call remove_* for each:
+
+  @artist.albums.each do |album|
+    @artist.remove_album(album)
+  end
 
 == Caching
 
@@ -304,11 +320,11 @@ Associations are cached after being retrieved:
   @album.artists # Cached - No Database Query
   
 You can choose to ignore the cached versions and do a database query to
-retrieve results by passing a true argument to the association method:
+retrieve results by passing a <tt>reload: true</tt> option to the association method:
 
   @album.artists # Not cached - Database Query
   @album.artists # Cached - No Database Query
-  @album.artists(true) # Ignore cache - Database Query
+  @album.artists(reload: true) # Ignore cache - Database Query
 
 If you reload/refresh the object, it will automatically clear the
 associations cache for the object:
@@ -326,15 +342,21 @@ instance method:
   @album.artists # [<Artist ...>, ...]
   @album.associations[:artists] # [<Artist ...>, ...]
 
+=== Code Reloading
+
+When declaring associations, Sequel caches association metadata in the association reflection. If you're doing any code reloading that doesn't involve restarting the related process, you should disable caching of the association reflection, to avoid stale model classes still being referenced after reloading:
+
+  Sequel::Model.cache_associations = false
+
 == Dataset Method
 
-In addition to the above methods, associations also add a instance method
+In addition to the above methods, associations also add an instance method
 ending in +_dataset+ that returns a dataset representing the objects in the associated table:
 
   @album.artist_id
   # 10
   @album.artist_dataset
-  # SELECT * FROM artists WHERE (id = 10)
+  # SELECT * FROM artists WHERE (id = 10) LIMIT 1
   
   @artist.id
   # 20
@@ -349,7 +371,7 @@ it can be further filtered, ordered, etc.:
    order(:copies_sold).
    limit(10)
   # SELECT * FROM albums
-  # WHERE ((artist_id = 20) AND (name LIKE 'A%'))
+  # WHERE ((artist_id = 20) AND (name LIKE 'A%' ESCAPE '\'))
   # ORDER BY copies_sold LIMIT 10
 
 Records retrieved using the +_dataset+ method are not cached in the
@@ -384,68 +406,72 @@ all albums for a given artist, you would usually do:
 
 You can also do the following:
 
-  Album.where(:artist=>@artist).all
+  Album.where(artist: @artist).all
   # or leave off the .all for a dataset
 
 For filtering by a single association, this isn't very useful.  However, unlike
 using the association method, using a filter allows you to filter by multiple
 associations:
 
-  Album.where(:artist=>@artist, :publisher=>@publisher)
+  Album.where(artist: @artist, publisher: @publisher)
 
 This will return all albums by that artist and published by that publisher.
 This isn't possible using just the association method approach, though you
 can combine the approaches:
 
-  @artist.albums_dataset.where(:publisher=>@publisher)
+  @artist.albums_dataset.where(publisher: @publisher)
 
 This doesn't just work for +many_to_one+ associations, it also works for
-+one_to_one+, +one_to_many+, and +many_to_many+ associations:
+the other associations:
 
   Album.one_to_one :album_info
   # The album related to that AlbumInfo instance
-  Album.where(:album_info=>AlbumInfo[2])
+  Album.where(album_info: AlbumInfo[2])
 
   Album.one_to_many :tracks
   # The album related to that Track instance
-  Album.where(:tracks=>Track[3])
+  Album.where(tracks: Track[3])
 
   Album.many_to_many :tags
   # All albums related to that Tag instance
-  Album.where(:tags=>Tag[4])
+  Album.where(tags: Tag[4])
+
+  Album.one_through_one :tag
+  # All albums related to that Tag instance
+  Album.where(tag: Tag[4])
 
 Note that for +one_to_many+ and +many_to_many+ associations, you still
 use the plural form even though only a single model object is given.
 
 You can also exclude by associations:
 
-  Album.exclude(:artist=>@artist).all
+  Album.exclude(artist: @artist).all
   
 This will return all albums not by that artist.
 
 You can also provide an array with multiple model objects:
 
-  Album.where(:artist=>[@artist1, @artist2]).all
+  Album.where(artist: [@artist1, @artist2]).all
 
 Similar to using an array of integers or strings, this will return
 all albums whose artist is one of those two artists.  You can also
 use +exclude+ if you want all albums not by either of those artists:
 
-  Album.exclude(:artist=>[@artist1, @artist2]).all
+  Album.exclude(artist: [@artist1, @artist2]).all
 
 If you are using a +one_to_many+ or +many_to_many+ association, you
 may want to return records where the records matches all of multiple
 records, instead of matching any of them.  For example:
 
-  Album.where(:tags=>[@tag1, @tag2])
+  Album.where(tags: [@tag1, @tag2])
   
 This matches albums that are associated with either @tag1 or @tag2 or
 both.  If you only want ones that you are associated with both, you can
 use separate filter calls:
 
-  Album.where(:tags=>@tag1).where(:tags=>@tag2)
+  Album.where(tags: @tag1).where(tags: @tag2)
 
-Or the the array form of condition specifiers:
+Or the array form of condition specifiers:
 
   Album.where([[:tags, @tag1], [:tags, @tag2]])
 
@@ -453,17 +479,28 @@ These will return albums associated with both @tag1 and @tag2.
 
 You can also provide a dataset value when filtering by associations:
 
-  Album.where(:artist=>Artist.where(Sequel.like(:name, 'A%'))).all
+  Album.where(artist: Artist.where(Sequel.like(:name, 'A%'))).all
 
 This will return all albums whose artist starts with 'A'. Like
 the other forms, this can be inverted:
 
-  Album.exclude(:artist=>Artist.where(Sequel.like(:name, 'A%'))).all
+  Album.exclude(artist: Artist.where(Sequel.like(:name, 'A%'))).all
  
 This will return all albums whose artist does not start with 'A'.
 
-Note that filtering by associations only works correctly for simple
-associations (ones without conditions).
+Filtering by associations even works for associations that have
+conditions added via the :conditions option or a block:
+
+  Album.one_to_many :popular_tags, clone: :tags do |ds|
+    ds.where{times_used > 1000}
+  end
+  Album.where(popular_tags: [@tag1, @tag2])
+
+This will return all albums that whose popular tags would include
+at least one of those tags.
+
+Note that filtering by associations does not work for associations
+that use blocks with instance-specific code.
 
 == Name Collisions
 
@@ -501,14 +538,14 @@ Which could be created using the following Sequel code:
   DB.create_table(:artists) do
     # Primary key must be set explicitly
     primary_key :id
-    String :name
+    String :name, null: false, unique: true
   end
   DB.create_table(:albums) do
     primary_key :id
     # Table that foreign key references needs to be set explicitly
     # for a database foreign key reference to be created.
-    foreign_key :artist_id, :artists
-    String :name
+    foreign_key :artist_id, :artists, null: false
+    String :name, null: false, unique: true
   end
 
 If you already had a schema such as:
@@ -521,7 +558,7 @@ If you already had a schema such as:
 Then you just need to add the column:
 
   DB.alter_table(:albums) do
-    add_foreign_key :artist_id, :artists
+    add_foreign_key :artist_id, :artists, null: false
   end
 
 === many_to_many
@@ -557,11 +594,13 @@ wanted to add an albums_artists join table to create the following schema:
 
 You could use the following Sequel code:
 
-  DB.create_join_table(:album_id=>:albums, :artist_id=>:artists)
+  DB.create_join_table(album_id: :albums, artist_id: :artists)
   # or
   DB.create_table(:albums_artists) do
-    foreign_key :album_id, :albums
-    foreign_key :artist_id, :artists
+    foreign_key :album_id, :albums, null: false
+    foreign_key :artist_id, :artists, null: false
+    primary_key [:album_id, :artist_id]
+    index [:artist_id, :album_id]
   end
 
 == Association Scope
@@ -598,12 +637,12 @@ To fix this, you need to specify the full model class name using the
 
   module App1
     class Artist < Sequel::Model
-      one_to_many :albums, :class=>"App2::Album"
+      one_to_many :albums, class: "App2::Album"
     end
   end
   module App2
     class Album < Sequel::Model
-      many_to_one :artist, :class=>"App1::Artist"
+      many_to_one :artist, class: "App1::Artist"
     end
   end
 
@@ -616,7 +655,7 @@ used is not correct, you need to specify the full class name with the
       one_to_many :albums
     end
     class Album < Sequel::Model
-      many_to_one :artist, :class=>"App1::AlbumArtist"
+      many_to_one :artist, class: "App1::AlbumArtist"
     end
   end
 
@@ -625,7 +664,7 @@ used is not correct, you need to specify the full class name with the
 In all of these methods, _association_ is replaced by the symbol you
 pass to the association.
 
-=== _association_(reload = false) (e.g. albums)
+=== _association_(opts={}) (e.g. albums)
 
 For +many_to_one+ and +one_to_one+ associations, the _association_ method
 returns either the single object associated, or nil if no object is
@@ -669,15 +708,23 @@ association name is used in this method.
 In addition to passing an actual associated object, you can pass a hash,
 and a new associated object will be created from them:
 
-  @artist.add_album(:name=>'RF') # creates Album object
+  @artist.add_album(name: 'RF') # creates Album object
 
-The add_<i>association</i> method returns the now associated object:
+The add_<i>association</i> method returns the new associated object:
 
-  @album = @artist.add_album(:name=>'RF')
+  @album = @artist.add_album(name: 'RF')
+
+Note that the add_* methods for +one_to_many+ persist the changes by
+saving the passed in (or newly created) object.  However, to avoid
+silent failures of these methods, they explicitly raise exceptions
+even when raise_on_save_failure is false for the associated model.
+You can disable this behavior (i.e. return nil instead of raising
+exceptions on a save failure) by setting the <tt>raise_on_save_failure: false</tt>
+option for the association.
 
 === remove_<i>association</i>(object_to_disassociate) (e.g. remove_album) [+one_to_many+ and +many_to_many+]
 
-The remove_<i>association</i> method disassociates the the passed object from
+The remove_<i>association</i> method disassociates the passed object from
 the current object.  For +one_to_many+ associations, it sets the foreign key of
 the associated object to NULL, and saves the associated object.  For
 +many_to_many+ associations, this deletes the matching row in the join table.
@@ -715,11 +762,8 @@ all associated objects to NULL in a single query.  For +many_to_many+
 associations, this deletes all matching rows in the join table.
 Unlike the add_<i>association</i> and remove_<i>association</i> method, the
 plural form of the association name is used in this method.
-The remove_all_<i>association</i> method returns the number of rows updated
-for +one_to_many+ associations and the number of rows deleted for
-+many_to_many+ associations:
-
-  @rows_modified = @artist.remove_all_albums
+The remove_all_<i>association</i> method returns the previously cached associated
+records, or nil if there were no cached associated records.
 
 === <i>association</i>_dataset (e.g. albums_dataset)
 
@@ -735,7 +779,7 @@ added methods:
   ds.model_object # @artist
   ds.association_reflection # same as Artist.association_reflection(:albums)
 
-For a more info on Sequel's reflection capabilities see the {Reflection page}[link:files/doc/reflection_rdoc.html].
+For a more info on Sequel's reflection capabilities see the {Reflection page}[rdoc-ref:doc/reflection.rdoc].
 
 == Overriding Method Behavior
 
@@ -743,7 +787,7 @@ Sequel is designed to be very flexible.  If the default behavior of the
 association modification methods isn't what you desire, you can override
 the methods in your classes.  However, you should be aware that for each
 of the association modification methods described, there is a private
-method that is preceeded by an underscore that does the actual
+method that is preceded by an underscore that does the actual
 modification.  The public method without the underscore handles caching
 and callbacks, and shouldn't be overridden by the user.
 
@@ -753,7 +797,7 @@ only difference between the two is that if you use an association option
 to change the method Sequel defines, you cannot call super to get the
 default behavior.
 
-=== _<i>association</i>= (:setter option)
+=== :setter (_<i>association</i>= method)
 
 Let's say you want to set a specific field whenever associating an object
 using the association setter method.  For example, let's say you have
@@ -762,11 +806,7 @@ album is associated with an artist, it should be filed under the artist's
 name and the album's name, otherwise it should just use the album's name.
 
   class Album < Sequel::Model
-    many_to_one :artist
-    
-    private
-    
-    def _artist=(artist)
+    many_to_one :artist, setter: (lambda do |artist|
       if artist
         self.artist_id = artist.id
         self.file_under = "#{artist.name}-#{name}"
@@ -774,64 +814,84 @@ name and the album's name, otherwise it should just use the album's name.
         self.artist_id = nil
         self.file_under = name
       end
-    end
+    end)
   end
 
 The above example is contrived, as you would generally use a before_save model
 hook to handle such a modification.  However, if you only modify the album's
 artist using the artist= method, this approach may perform better.
 
-=== \_add_<i>association</i> (:adder option)
+=== :adder (\_add_<i>association</i> method)
 
-Continuing with the same example, here's how would you handle the same case if
+Continuing with the same example, here's how you would handle the same case if
 you also wanted to handle the Artist#add_album method:
 
   class Artist < Sequel::Model
-    one_to_many :albums
-    
-    private
-    
-    def _add_album(album)
-      album.update(:artist_id => id, :file_under=>"#{name}-#{album.name}")
-    end
+    one_to_many :albums, adder: (lambda do |album|
+      album.update(artist_id: id, file_under: "#{name}-#{album.name}")
+    end)
   end
 
-=== \_remove_<i>association</i> (:remover option)
+You can set this to +nil+ to not create a add_<i>association</i> method.
 
-Continuing with the same example, here's how would you handle the same case if
+=== :remover (\_remove_<i>association</i> method)
+
+Continuing with the same example, here's how you would handle the same case if
 you also wanted to handle the Artist#remove_album method:
 
   class Artist < Sequel::Model
-    one_to_many :albums
-    
-    private
-    
-    def _remove_album(album)
-      album.update(:artist_id => nil, :file_under=>album.name)
-    end
+    one_to_many :albums, remover: (lambda do |album|
+      album.update(artist_id: nil, file_under: album.name)
+    end)
   end
 
-=== \_remove_all_<i>association</i> (:clearer option)
+You can set this to +nil+ to not create a remove_<i>association</i> method.
 
-Continuing with the same example, here's how would you handle the same case if
+=== :clearer (\_remove_all_<i>association</i> method)
+
+Continuing with the same example, here's how you would handle the same case if
 you also wanted to handle the Artist#remove_all_albums method:
 
   class Artist < Sequel::Model
-    one_to_many :albums
-    
-    private
-    
-    def _remove_all_albums
-      # This is Dataset#update, not Model#update, so the :file_under=>:name
+    one_to_many :albums, clearer: (lambda do
+      # This is Dataset#update, not Model#update, so the file_under: :name
       # ends up being "SET file_under = name" in SQL.
-      albums_dataset.update(:artist_id => nil, :file_under=>:name)
-    end
+      albums_dataset.update(artist_id: nil, file_under: :name)
+    end)
   end
+
+You can set this to +nil+ to not create a remove_all_<i>association</i> method.
+
+=== :no_dataset_method
+
+Setting this to true will result in the <i>association</i>_dataset method
+not being defined. This can save memory if you only use the <i>association</i>
+method and do not call the <i>association</i>_dataset method directly or
+indirectly.
+
+=== :no_association_method
+
+Setting this to true will result in the <i>association</i> method
+not being defined. This can save memory if you only use the
+<i>association</i>_dataset method and do not call the <i>association</i> method
+directly or indirectly.
 
 == Association Options
 
 Sequel's associations mostly share the same options.  For ease of understanding,
-they are grouped here by section
+they are grouped here by section.
+
+The defaults for any of these options can be set at the class level using
+<tt>Sequel::Model.default_association_options</tt>.  To make
+associations read only by default:
+
+  Sequel::Model.default_association_options[:read_only] = true
+
+Many of these options are specific to particular association types, and
+the defaults can be set on a per association type basis.  To make one_to_many
+associations read only by default:
+
+  Sequel::Model.default_association_type_options[:one_to_many] = {read_only: true}
 
 === Association Dataset Modification Options
 
@@ -843,19 +903,37 @@ use for the association.  For example, if you wanted an association
 that returns all albums of an artist that went gold (sold at least
 500,000 copies):
 
-  Artist.one_to_many :gold_albums, :class=>:Album do |ds|
+  Artist.one_to_many :gold_albums, class: :Album do |ds|
     ds.where{copies_sold > 500000}
+  end
+
+The result of the block is cached as an optimization.  One of the side
+effects of that is that if your block depends on external state, it won't
+work correctly unless you setup a delayed evaluation.  For example:
+
+  Artist.one_to_many :gold_albums, class: :Album do |ds|
+    ds.where{copies_sold > $gold_limit}
+  end
+
+In this case if you change <tt>$gold_limit</tt> later, the changes won't
+effect the association.  If you want to pick up changes to <tt>$gold_limit</tt>,
+you need to setup a delayed evaluation:
+
+  Artist.one_to_many :gold_albums, class: :Album do |ds|
+    ds.where{copies_sold > Sequel.delay{$gold_limit}}
   end
 
 ==== :class
 
 This is the class of the associated objects that will be used.  It's
 one of the most commonly used options.  If it is not given, it guesses
-based on the name of the association.  If a *_to_many association is
-used, uses the singular form of the association name.  For example:
+based on the name of the association, including considering the namespace
+of the current model.  If a *_to_many association is used, this uses the
+singular form of the association name.  For example:
 
   Album.many_to_one :artist # guesses Artist
   Artist.one_to_many :albums # guesses Album
+  Foo::Artist.one_to_many :albums # guesses Foo::Album
 
 However, for more complex associations, especially ones that add
 additional filters beyond the foreign/primary key relationships, the
@@ -869,36 +947,47 @@ default class guessed will be wrong:
 You can specify the :class option using the class itself, a Symbol,
 or a String:
 
-  Album.many_to_one :artist, :class=>Artist # Class
-  Album.many_to_one :artist, :class=>:Artist # Symbol
-  Album.many_to_one :artist, :class=>"Artist" # String
+  Album.many_to_one :artist, class: Artist   # Class
+  Album.many_to_one :artist, class: :Artist  # Symbol
+  Album.many_to_one :artist, class: "Artist" # String
+
+If you are namespacing your models, and you need to specify the :class
+option, the path you give to the :class option should be the full path
+to the associated class including any namespaces:
+
+  Foo::Album.many_to_one :artist                       # Uses Foo::Artist
+  Foo::Album.many_to_one :artist, class: "Artist"      # Uses Artist
+  Foo::Album.many_to_one :artist, class: "Foo::Artist" # Uses Foo::Artist
 
 ==== :key
 
-For +many_to_one+ associations, is the foreign_key in current model's table
-that references associated model's primary key, as a symbol.  Defaults to
-:<i>association</i>_id.  Can use an array of symbols for a composite key
-association.
+For +many_to_one+ associations, this is the foreign_key in the current model's
+table that references the associated model's primary key as a symbol.
+Defaults to :<i>association</i>_id.
 
-  Album.many_to_one :artist # :key=>:artist_id
+  Album.many_to_one :artist, key: :artistid
 
 For +one_to_one+ and +one_to_many+ associations, is the foreign key in
 associated model's table that references current model's primary key, as a
 symbol.  Defaults to :"#{self.name.underscore}_id".
 
-  Artist.one_to_many :albums # :key=>:artist_id
+  Artist.one_to_many :albums, key: :artistid
 
 In both cases an array of symbols can be used for a composite key association:
 
-  Apartment.many_to_one :building # :key=>[:city, :address]
+  Apartment.many_to_one :building, key: [:city, :address]
 
 ==== :conditions
 
 The conditions to use to filter the association, can be any argument passed to +where+.
 If you use a hash or an array of two element arrays, this will also be used as a
-filter when using eager_graph to load the association.
+filter when using eager_graph or association_join to load the association.
 
-  Artist.one_to_many :good_albums, :class=>:Album, :conditions=>{:good=>true}
+If you do not use a hash or array of two element arrays, you should use the
+:graph_conditions, :graph_only_conditions, or :graph_block option or you will not
+be able to use eager_graph or association_join with the association.
+
+  Artist.one_to_many :good_albums, class: :Album, conditions: {good: true}
   @artist.good_albums
   # SELECT * FROM albums WHERE ((artist_id = 1) AND (good IS TRUE))
 
@@ -907,10 +996,8 @@ filter when using eager_graph to load the association.
 The column(s) by which to order the association dataset.  Can be a
 singular column or an array.
 
-  Artist.one_to_many :albums_by_name, :class=>:Album,
-   :order=>:name
-  Artist.one_to_many :albums_by_num_tracks, :class=>:Album,
-   :order=>[:num_tracks, :name]
+  Artist.one_to_many :albums_by_name, class: :Album, order: :name
+  Artist.one_to_many :albums_by_num_tracks, class: :Album, order: [:num_tracks, :name]
 
 ==== :select
 
@@ -926,50 +1013,50 @@ can clash with columns from the associated table, so you should alias any
 columns that have the same name in both the join table and the associated
 table.  Example:
 
-  Artist.one_to_many :albums, :select=>[:id, :name]
-  Album.many_to_many :tags, :select=>[Sequel.expr(:tags).*, :albums_tags__number]
+  Artist.one_to_many :albums, select: [:id, :name]
+  Album.many_to_many :tags, select: [Sequel[:tags].*, Sequel[:albums_tags][:number]]
 
 ==== :limit
 
 Limit the number of records to the provided value:
 
-  Artist.one_to_many :best_selling_albums, :class=>:Album,
-  :order=>:copies_sold, :limit=>5 # LIMIT 5
+  Artist.one_to_many :best_selling_albums, class: :Album, order: :copies_sold, limit: 5
 
 Use an array with two arguments for the value to specify a limit and an offset.
 
-  Artist.one_to_many :next_best_selling_albums, :class=>:Album,
-   :order=>:copies_sold, :limit=>[10, 5] # LIMIT 10 OFFSET 5
+  Artist.one_to_many :next_best_selling_albums, class: :Album, order: :copies_sold, limit: [10, 5]
+  # LIMIT 10 OFFSET 5
 
 This probably doesn't make a lot of sense for *_to_one associations, though you
 could use it to specify an offset.
 
-==== :join_table [+many_to_many+]
+==== :join_table [+many_to_many+, +one_through_one+]
 
 Name of table that includes the foreign keys to both the current model and the
 associated model, as a symbol.  Defaults to the name of current model and name
 of associated model, pluralized, underscored, sorted, and joined with '_'.
 Here's an example of the defaults:
 
-  Artist.many_to_many :albums # :join_table=>:albums_artists
-  Album.many_to_many :artists # :join_table=>:albums_artists
-  Person.many_to_many :colleges # :join_table=>:colleges_people
+  Artist.many_to_many :albums, join_table: :albums_artists
+  Album.many_to_many :artists, join_table: :albums_artists
+  Person.many_to_many :colleges, join_table: :colleges_people
 
-==== :left_key [+many_to_many+]
+==== :left_key [+many_to_many+, +one_through_one+]
 
 Foreign key in join table that points to current model's primary key, as a
 symbol.  Defaults to :"#{model_name.underscore}_id".
 
-  Album.many_to_many :tags # :left_key=>:album_id
+  Album.many_to_many :tags, left_key: :album_id
 
 Can use an array of symbols for a composite key association.
 
-==== :right_key [+many_to_many+]
+==== :right_key [+many_to_many+, +one_through_one+]
 
 Foreign key in join table that points to associated model's primary key, as a
-symbol.  Defaults to :"#{association_name.singularize}_id".
+symbol.  Defaults to :"#{association_name.singularize}_id" for +many_to_many+
+and :"#{association_name}_id" for +one_through_one+.
 
-  Album.many_to_many :tags # :right_key=>:tag_id
+  Album.many_to_many :tags, right_key: :tag_id
   
 Can use an array of symbols for a composite key association.
 
@@ -995,10 +1082,10 @@ into the cloned options.
 This is commonly used if you have a bunch of similar associations that
 you want to DRY up:
 
-  one_to_many :english_verses, :class=>:LyricVerse, :key=>:lyricsongid,
-    :order=>:number, :conditions=>{:languageid=>1}
-  one_to_many :romaji_verses, :clone=>:english_verses, :conditions=>{:languageid=>2}
-  one_to_many :japanese_verses, :clone=>:english_verses, :conditions=>{:languageid=>3}
+  one_to_many :english_verses, class: :LyricVerse, key: :lyricsongid,
+    order: :number, conditions: {languageid: 1}
+  one_to_many :romaji_verses, clone: :english_verses, conditions: {languageid: 2}
+  one_to_many :japanese_verses, clone: :english_verses, conditions: {languageid: 3}
 
 Note that for the final two asociations, you didn't have to specify the :class,
 :key, or :order options, as they were copied by the :clone option.  By specifying
@@ -1007,8 +1094,8 @@ option of the first association, it doesn't attempt to merge them.
 
 In addition to the options hash, the :clone option will copy a block argument
 from the existing situation.  If you want a cloned association to not have the
-same block as the association you are cloning from, specify the :block=>nil option
-in additon to the :clone option.
+same block as the association you are cloning from, specify the block: nil option
+in addition to the :clone option.
 
 ==== :dataset
 
@@ -1026,24 +1113,22 @@ already applied, and the proc should return a modified copy of this dataset.
 Here's an example of an association of songs to artists through lyrics, where
 the artist can perform any one of four tasks for the lyric:
 
-  Album.one_to_many :songs, :dataset=>(proc do |r|
+  Artist.one_to_many :songs, dataset: (lambda do |r|
     r.associated_dataset.select_all(:songs).
-     join(Lyric, :id=>:lyricid,
-      id=>[:composer_id, :arranger_id, :vocalist_id, :lyricist_id])
+     join(:lyrics, id: :lyricid, id=>[:composer_id, :arranger_id, :vocalist_id, :lyricist_id])
   end)
   Artist.first.songs_dataset
   # SELECT songs.* FROM songs
-  # INNER JOIN lyrics ON
-  #  lyrics.id = songs.lyric_id AND
-  #  1 IN (composer_id, arranger_id, vocalist_id, lyricist_id)
+  # INNER JOIN lyrics ON ((lyrics.id = songs.lyric_id)
+  #   AND (1 IN (composer_id, arranger_id, vocalist_id, lyricist_id))
 
 ==== :extend
 
 A module or array of modules to extend the dataset with.  These are used to
 set up association extensions.  For more information , please see the
-{Advanced Associations page}[link:files/doc/advanced_associations_rdoc.html].
+{Advanced Associations page}[rdoc-ref:doc/advanced_associations.rdoc].
 
-==== :primary_key
+==== :primary_key [+many_to_one+, +one_to_one+, +one_to_many+]
 
 The column that the :key option references, as a symbol. For +many_to_one+
 associations, this column is in the associated table. For +one_to_one+ and
@@ -1052,30 +1137,30 @@ it defaults to the primary key of the table. Can use an
 array of symbols for a composite key association.
 
   Artist.set_primary_key :arid
-  Artist.one_to_many :albums # :primary_key=>:arid
-  Album.one_to_many :artist # :primary_key=>:arid
+  Artist.one_to_many :albums, primary_key: :arid
+  Album.one_to_many :artist, primary_key: :arid
 
-==== :left_primary_key [+many_to_many+]
+==== :left_primary_key [+many_to_many+, +one_through_one+]
 
 Column in current table that :left_key option points to, as a symbol.
 Defaults to primary key of current table.
 
   Album.set_primary_key :alid
-  Album.many_to_many :tags # :left_primary_key=>:alid
+  Album.many_to_many :tags, left_primary_key: :alid
 
 Can use an array of symbols for a composite key association.
 
-==== :right_primary_key [+many_to_many+]
+==== :right_primary_key [+many_to_many+, +one_through_one+]
 
 Column in associated table that :right_key points to, as a symbol.
 Defaults to primary key of the associated table.
 
   Tag.set_primary_key :tid
-  Album.many_to_many :tags # :right_primary_key=>:tid
+  Album.many_to_many :tags, right_primary_key: :tid
 
 Can use an array of symbols for a composite key association.
 
-==== :join_table_block [+many_to_many+]
+==== :join_table_block [+many_to_many+, +one_through_one+]
 
 A proc that can be used to modify the dataset used in the add/remove/remove_all
 methods.  It's separate from the association block, as that is called on a
@@ -1083,9 +1168,26 @@ join of the join table and the associated table, whereas this option just
 applies to the join table.  It can be used to make sure that filters are used
 when deleting.
 
-  Artist.many_to_many :lead_guitar_albums, :join_table_block=>proc do |ds|
-    ds.where(:instrument_id=>5)
-  end
+  Artist.many_to_many :lead_guitar_albums, class: :Album, join_table_block: (lambda do |ds|
+    ds.where(instrument_id: 5)
+  end)
+
+==== :join_table_db [+many_to_many+, +one_through_one+]
+
+A Sequel::Database to use for the join table.  Specifying this option switches the
+loading to use a separate query for the join table.  This is useful if the
+join table is not located in the same database as the associated table, or
+if the database account with access to the associated table doesn't have
+access to the join table.
+
+For example, if the Album class uses a different Sequel::Database than the Artist
+class, and the join table is in the database that the Artist class uses:
+
+  Artist.many_to_many :lead_guitar_albums, class: :Album, join_table_db: Artist.db
+
+This option also affects the add/remove/remove_all methods, by changing
+which database is used for inserts/deletes from the join table (add/remove/remove_all
+defaults to use the current model's database instead of the associated model's database).
 
 === Callback Options
 
@@ -1095,14 +1197,10 @@ that are called with the associated object.  Procs are called with the receiver
 as the first argument and the associated object as the second argument.  If
 an array is given, all of them are called in order.  
 
-Before callbacks are often used to check preconditions, they can return
-false to signal Sequel to abort the modification.  If any before callback
-returns false, the remaining before callbacks are not called and modification
-is aborted.  Before callbacks are also commonly used to modify the current
-object or the associated object.
-
-After callbacks are often used for notification (logging, email) after a
-successful modification has been made.
+Before callbacks are often used to check preconditions, they can call Model#cancel_action 
+to signal Sequel to abort the modification.  If any before callback
+calls cancel_action, the remaining before callbacks are not called and the modification
+is aborted.
 
 ==== :before_add [+one_to_many+, +many_to_many+]
 
@@ -1110,7 +1208,7 @@ Called before adding an object to the association:
   
   class Artist
     # Don't allow adding an album to an artist if it has no tracks
-    one_to_many :albums, :before_add=>proc{|ar, al| false if al.num_tracks == 0}
+    one_to_many :albums, before_add: lambda{|ar, al| ar.cancel_action if al.num_tracks == 0}
   end
 
 ==== :after_add [+one_to_many+, +many_to_many+]
@@ -1119,38 +1217,42 @@ Called after adding an object to the association:
   
   class Artist
     # Log all associations of albums to an audit logging table
-    one_to_many :albums, :after_add=>:log_add_album
+    one_to_many :albums, after_add: :log_add_album
     
     private
     
     def log_add_album(album)
-      DB[:audit_logs].insert(:log=>"Album #{album.inspect} associated to #{inspect}")
+      DB[:audit_logs].insert(log: "Album #{album.inspect} associated to #{inspect}")
     end
   end
 
 ==== :before_remove [+one_to_many+, +many_to_many+]
 
-Called before removing an object from the association:
+Called before removing an object from the association using <tt>remove_<i>association</i></tt>:
 
   class Artist
     # Don't allow removing a self-titled album
-    one_to_many :albums, :before_remove=>proc{|ar, al| false if al.name == ar.name}
+    one_to_many :albums, before_remove: lambda{|ar, al| ar.cancel_action if al.name == ar.name}
   end
+
+This is not called when using <tt>remove_all_<i>association</i></tt>.
 
 ==== :after_remove [+one_to_many+, +many_to_many+]
 
-Called after removing an object from the association:
+Called after removing an object from the association using <tt>remove_<i>association</i></tt>:
 
   class Artist
     # Log all disassociations of albums to an audit logging table
-    one_to_many :albums, :after_remove=>:log_remove_album
+    one_to_many :albums, after_remove: :log_remove_album
     
     private
     
     def log_remove_album(album)
-      DB[:audit_logs].insert(:log=>"Album #{album.inspect} disassociated from #{inspect}")
+      DB[:audit_logs].insert(log: "Album #{album.inspect} disassociated from #{inspect}")
     end
   end
+
+This is not called when using <tt>remove_all_<i>association</i></tt>.
 
 ==== :before_set [+many_to_one+, +one_to_one+]
 
@@ -1159,7 +1261,7 @@ Called before the _<i>association</i>= method is called to modify the objects:
   class Album
     # Don't associate the album with an artist if the year the album was
     # released is less than the year the artist/band started.
-    many_to_one :artist, :before_set=>proc{|al, ar| false if al.year < ar.year_started}
+    many_to_one :artist, before_set: lambda{|al, ar| al.cancel_action if al.year < ar.year_started}
   end
 
 ==== :after_set [+many_to_one+, +one_to_one+]
@@ -1168,12 +1270,12 @@ Called after the _<i>association</i>= method is called to modify the objects:
 
   class Album
     # Log all disassociations of albums to an audit logging table
-    many_to_one :artist, :after_set=>:log_artist_set
+    many_to_one :artist, after_set: :log_artist_set
     
     private
     
     def log_artist_set(artist)
-      DB[:audit_logs].insert(:log=>"Artist for album #{inspect} set to #{artist.inspect}")
+      DB[:audit_logs].insert(log: "Artist for album #{inspect} set to #{artist.inspect}")
     end
   end
 
@@ -1182,16 +1284,15 @@ Called after the _<i>association</i>= method is called to modify the objects:
 Called after retrieving the associated records from the database.
 
   class Artist
-    # Cache all album names to a single string when retrieving the
-    # albums.
-    one_to_many :albums, :after_load=>:cache_album_names
+    # Cache all album names to a single string when retrieving the albums.
+    one_to_many :albums, after_load: :cache_album_names
     
     attr_reader :album_names
     
     private
     
     def cache_album_names(albums)
-      @album_names = albums.map{|x| x.name}.join(", ")
+      @album_names = albums.map(&:name).join(", ")
     end
   end
 
@@ -1219,23 +1320,23 @@ For example, if you know that any time that you want to load an artist's
 albums, you are also going to want access to the album's tracks as well:
 
   # Eager load tracks when loading the albums
-  Artist.one_to_many :albums, :eager=>:tracks
+  Artist.one_to_many :albums, eager: :tracks
   
 You can also use a hash or array to specify multiple dependent associations
 to eagerly load:
 
   # Eager load the albums' tracks and the tracks' tags when loading the albums
-  Artist.one_to_many :albums, :eager=>{:tracks=>:tags}
+  Artist.one_to_many :albums, eager: {tracks: :tags}
   # Eager load the albums' tags and tracks when loading the albums
-  Artist.one_to_many :albums, :eager=>[:tags, :tracks]
+  Artist.one_to_many :albums, eager: [:tags, :tracks]
   # Eager load the albums' tags, tracks, and tracks' tags when loading the albums
-  Artist.one_to_many :albums, :eager=>[:tags, {:tracks=>:tags}]
+  Artist.one_to_many :albums, eager: [:tags, {tracks: :tags}]
 
 ==== :eager_loader
 
 A custom loader to use when eagerly load associated objects via eager.
 For many details and examples of custom eager loaders, please see the
-{Advanced Associations guide}[link:files/doc/advanced_associations_rdoc.html].
+{Advanced Associations guide}[rdoc-ref:doc/advanced_associations.rdoc].
 
 ==== :eager_loader_key
 
@@ -1248,7 +1349,7 @@ performance if a custom eager loader does not use the key_hash).
 
 If given, should be a proc to use instead of the association method block
 when eagerly loading.  To not use a block when eager loading when one is
-used normally, should to nil.  It's very uncommon to need this option.
+used normally, set to nil.  It's very uncommon to need this option.
 
 === Eager Loading via eager_graph (one query with joins) Options
 
@@ -1259,13 +1360,11 @@ object(s). This is useful for example if you always want to eagerly load depende
 associations when loading this association, but you want to filter or order the
 association based on dependent associations:
 
-  Artist.one_to_many :albums_with_short_tracks, :class=>:Album,
-   :eager_graph=>:tracks do |ds|
-    ds.where{tracks__seconds < 120}
+  Artist.one_to_many :albums_with_short_tracks, class: :Album, eager_graph: :tracks do |ds|
+    ds.where{tracks[:seconds] < 120}
   end
-  Artist.one_to_many :albums_by_track_name, :class=>:Album,
-   :eager_graph=>:tracks do |ds|
-    ds.order(:tracks__name)
+  Artist.one_to_many :albums_by_track_name, class: :Album, eager_graph: :tracks do |ds|
+    ds.order{tracks[:name]}
   end
 
 You can also use a hash or array of arguments for :eager_graph, similar to
@@ -1278,8 +1377,7 @@ association via eager_graph.  Should be a hash or an array of two element
 arrays.  If not specified, the :conditions option is used if it is a hash or
 array of two element arrays.
 
-  Artist.one_to_many :active_albums, :class=>:Album,
-    :graph_conditions=>{:active=>true}
+  Artist.one_to_many :active_albums, class: :Album, graph_conditions: {active: true}
 
 Note that these conditions on the association are in addition to the default
 conditions specified by the foreign/primary keys.  If you want to replace
@@ -1292,8 +1390,8 @@ The block to pass to Dataset#join_table when eagerly loading the association
 via eager_graph.  This is useful to specify conditions that can't be specified
 in a hash or array of two element arrays.
 
-  Artist.one_to_many :gold_albums, :class=>:Album,
-    :graph_block=>proc{|j,lj,js| Sequel.qualify(j, :copies_sold) > 500000}
+  Artist.one_to_many :gold_albums, class: :Album,
+    graph_block: proc{|j,lj,js| Sequel[j][:copies_sold] > 500000}
 
 ==== :graph_join_type
 
@@ -1301,7 +1399,7 @@ The type of SQL join to use when eagerly loading the association via
 eager_graph.  Defaults to :left_outer.  This is useful if you want to
 ensure that only artists that have albums are returned:
 
-  Artist.one_to_many :albums, :graph_join_type=>:inner
+  Artist.one_to_many :albums, graph_join_type: :inner
   # Will exclude artists without an album
   Artist.eager_graph(:albums).all
 
@@ -1323,10 +1421,11 @@ that the album was associated to the artist by name.  However, you weren't
 enforcing case sensitivity between the keys, so you still want to return albums
 where the artist's name differs in case:
 
-  Artist.one_to_many :albums, :key=>:artist_name, 
-    :graph_only_conditions=>nil, 
-    :graph_block=>proc{|j,lj,js| {Sequel.function(:lower, Sequel.qualify(j, :artist_name))=>
-      Sequel.function(:lower, Sequel.qualify(lj, :name))}}
+  Artist.one_to_many :albums, key: :artist_name, 
+    graph_only_conditions: nil, 
+    graph_block: (proc do |j,lj,js|
+      {Sequel.function(:lower, Sequel[j][:artist_name])=> Sequel.function(:lower, Sequel[lj][:name])}
+    end)
 
 Note how :graph_only_conditions is set to nil to ignore any existing conditions,
 and :graph_block is used to set up the case insensitive comparison.
@@ -1335,12 +1434,10 @@ Another case where :graph_only_conditions may be used is if you want to use
 a JOIN USING or NATURAL JOIN for the graph:
 
   # JOIN USING
-  Artist.one_to_many :albums, :key=>:artist_name,
-   :graph_only_conditions=>[:artist_name]
+  Artist.one_to_many :albums, key: :artist_name, graph_only_conditions: [:artist_name]
 
   # NATURAL JOIN
-  Artist.one_to_many :albums, :key=>:artist_name,
-   :graph_only_conditions=>nil, :graph_join_type=>:natural
+  Artist.one_to_many :albums, key: :artist_name, graph_only_conditions: nil, graph_join_type: :natural
 
 ==== :graph_alias_base
 
@@ -1353,7 +1450,7 @@ This is mostly useful if you have associations with the same name in many models
 to be able to easily tell which table alias corresponds to which association when eagerly
 graphing multiple associations with the same name.
 
-You can override this option on a per-graph basis by specifying the association as an
+You can override this option on a per-eager_graph basis by specifying the association as an
 SQL::AliasedExpression instead of a symbol:
 
   Album.eager_graph(Sequel.as(:artist, :a))
@@ -1367,19 +1464,21 @@ needed, as one of the other eager_graph related association options is usually s
 If specified, should be a proc that accepts a single hash argument, which will contain
 at least the following keys:
 
-:self :: The dataset that is doing the eager loading
-:table_alias :: An alias to use for the table to graph for this association.
-:implicit_qualifier :: The alias that was used for the current table (since you can cascade associations).
 :callback :: A callback proc used to dynamically modify the dataset to graph into the
              current dataset, before such graphing is done. This is nil if no callback
              proc is used.
+:implicit_qualifier :: The alias that was used for the current table (since you can cascade associations).
+:join_type :: Override the join type to use when graphing.
+:limit_strategy :: The limit strategy symbol to use when graphing (for limited associations only)
+:self :: The dataset that is doing the eager loading
+:table_alias :: An alias to use for the table to graph for this association.
 
 Example:
 
-  Artist.one_to_many :self_title_albums, :class=>:Album,
-   :eager_grapher=>(proc do |eo|
-    eo[:self].graph(Album, {:artist_id=>:id, :name=>:name},
-      :table_alias=>eo[:table_alias], :implicit_qualifier=>eo[:implicit_qualifier])
+  Artist.one_to_many :self_title_albums, class: :Album,
+   eager_grapher: (lambda do |eo|
+    eo[:self].graph(:albums, {artist_id: :id, name: :name},
+      table_alias: eo[:table_alias], implicit_qualifier: eo[:implicit_qualifier])
   end)
 
 ==== :order_eager_graph
@@ -1391,7 +1490,45 @@ Sequel has to do some guess work when attempting to add the association's
 order to an eager_graphed dataset.  In most cases it does so correctly, but
 if it has problems, you'll probably want to set this option to false.
 
-==== :graph_join_table_conditions [+many_to_many+]
+==== :graph_order
+
+Override the order added when using eager_graph, instead of using the one
+defined in :order.  This is useful if :order contains qualified identifiers,
+as the qualifiers may not match the aliases automatically used by eager_graph.
+This should contain unqualified identifiers, and eager_graph will automatically
+qualify them with the appropriate alias.
+
+==== :graph_use_association_block
+
+Setting this to true makes eager_graph apply the association block to the
+associated dataset before graphing the associated dataset into the receiver.
+In most cases when this option is used and the association has a block, the
+dataset returned by eager_graph will contain a JOIN to a subquery.
+
+By default (when this option is not used), the association block will be ignored
+when using eager_graph:
+
+  Artist.one_to_many :tracks do |ds|
+    ds.where(foo: 3)
+  end
+  Artist.eager_graph(:tracks)
+  # SELECT albums.id, tracks.id AS tracks_id, tracks.album_id
+  # FROM albums
+  # LEFT OUTER JOIN tracks
+  # ON (tracks.album_id = albums.id)
+
+When this option is used, the block will be respected:
+
+  Artist.one_to_many :tracks, graph_use_association_block: true do |ds|
+    ds.where(foo: 3)
+  end
+  Artist.eager_graph(:tracks)
+  # SELECT albums.id, tracks.id AS tracks_id, tracks.album_id
+  # FROM albums
+  # LEFT OUTER JOIN (SELECT * FROM tracks WHERE (foo = 3)) AS tracks
+  # ON (tracks.album_id = albums.id)
+
+==== :graph_join_table_conditions [+many_to_many+, +one_through_one+]
 
 The additional conditions to use on the SQL join for the join table when
 eagerly loading the association via eager_graph. Should be a hash or an array
@@ -1402,11 +1539,11 @@ degrees_received that includes a string field specifying the name of the
 degree, and you want to eager load all colleges for people where the person
 has received a specific degree:
 
-  Person.many_to_many :bs_degree_colleges, :class=>:College,
-    :join_table=>:degrees_received, 
-    :graph_join_table_conditions=>{:degree=>'BS'}
+  Person.many_to_many :bs_degree_colleges, class: :College,
+    join_table: :degrees_received, 
+    graph_join_table_conditions: {degree: 'BS'}
 
-==== :graph_join_table_block [+many_to_many+]
+==== :graph_join_table_block [+many_to_many+, +one_through_one+]
 
 The block to pass to join_table for the join table when eagerly loading the
 association via eager_graph.  This is used for similar reasons as :graph_block,
@@ -1421,14 +1558,14 @@ degrees_received that includes a string field specifying the name of the
 degree, and you want to eager load all colleges for people where the person
 has received a bachelor's degree (degree starting with B):
 
-  Person.many_to_many :bachelor_degree_colleges, :class=>:College,
-    :join_table=>:degrees_received,
-    :graph_join_table_block=>proc{|j,lj,js| Sequel.qualify(j, :degree).like('B%')}
+  Person.many_to_many :bachelor_degree_colleges, class: :College,
+    join_table: :degrees_received,
+    graph_join_table_block: proc{|j,lj,js| Sequel[j][:degree].like('B%')}
 
 This should be done when graphing the join table, instead of when graphing the
 final table, as :degree is a column of the join table.
 
-==== :graph_join_table_join_type [+many_to_many+]
+==== :graph_join_table_join_type [+many_to_many+, +one_through_one+]
 
 The type of SQL join to use for the join table when eagerly loading the
 association via eager_graph.  Defaults to the :graph_join_type option or
@@ -1436,7 +1573,7 @@ association via eager_graph.  Defaults to the :graph_join_type option or
 you want to use a different join type when JOINing to the join table then
 you want to use for JOINing to the final table
 
-==== :graph_join_table_only_conditions [+many_to_many+]
+==== :graph_join_table_only_conditions [+many_to_many+, +one_through_one+]
 
 The conditions to use on the SQL join for the join table when eagerly loading
 the association via eager_graph, instead of the default conditions specified
@@ -1445,129 +1582,85 @@ by the foreign/primary keys.  This option causes the
 you want to replace the default foreign/primary key conditions that Sequel
 would use when eagerly graphing.
 
-=== Column Naming Conflict Options
+=== Associations Based on SQL Expressions Options
 
-Sequel's association support historically called methods on model objects
-to get primary key or foreign key values instead of accessing the column
-values directly, in order to allow advanced features such as associations
-based on virtual column keys.  Unfortunately, that causes issues if columns
-are used with names that clash with existing method names, which can happen
-if you want to name the association the same name as an existing column, or
-if the column has the same name as an already defined method such as
-<tt>object_id</tt>.
+Sequel's associations can work not just with columns, but also with
+arbitrary SQL expressions.  For example, on PostgreSQL, you can store
+foreign keys to other tables in hstore, json, or jsonb columns, and Sequel
+can work with such constructs, including full support for
+eager loading.
 
-Sequel has added the following options that allow you to work around the
-issue by either specifying the column name symbol or the method name symbol
-to use.  In most cases, these methods are designed to be used with column
-aliases defined with <tt>Model.def_column_alias</tt>:
+There's actually two parts to supporting associations based on SQL
+expressions.  First is you must have an instance method in the model
+that returns the value that the SQL expression would return. Second
+is you must have an SQL expression object.  If Sequel has access to
+a model instance and needs to get the value of the expression, it
+calls the method to get the value.  If Sequel does not have access
+to a model instance, but needs to use the SQL expression in a query,
+it will use the SQL expression object.
+
+Below is an example storing foreign keys to other tables in a
+PostgreSQL hstore column, using the +pg_json+ and +pg_json_ops+
+extensions.
 
   # Example schema:
-  #  albums           artists
-  #   :id        /-->  :id
-  #   :artist --/      :name
+  #  albums          artists
+  #   :id       /---> :id
+  #   :meta ---/      :name
   #   :name
   class Album < Sequel::Model
-    def_column_alias(:artist_id, :artist)
-    many_to_one :artist, :key=>:artist_id, :key_column=>:artist
+    many_to_one :artist, key_column: Sequel.pg_jsonb(:meta)['artist_id'].cast(String).cast(Integer)
+
+    def artist_id
+      meta['artist_id'].to_i
+    end
+  end
+  class Artist < Sequel::Model
+    one_to_many :albums, key: Sequel.pg_jsonb(:meta)['artist_id'].cast(String).cast(Integer), key_method: :artist_id
   end
   
   # Example schema:
-  #  things              objs
-  #   :id           /-->  :id
-  #   :object_id --/      :name
-  #   :name
-  class Thing < Sequel::Model
-    def_column_alias(:obj_id, :object_id)
+  #  albums   albums_artists   artists
+  #   :id  <----- :meta -------> :id
+  #   :name                      :name
+  class Album < Sequel::Model
+    many_to_many :artists, left_key: Sequel.pg_jsonb(:meta)['album_id'].cast(String).cast(Integer),
+      right_key: Sequel.pg_jsonb(:meta)['artist_id'].cast(String).cast(Integer)
   end
-  class Obj < Sequel::Model
-    one_to_many :things, :key=>:object_id, :key_method=>:obj_id
+  class Artist < Sequel::Model
+    many_to_many :albums, left_key: Sequel.pg_jsonb(:meta)['artist_id'].cast(String).cast(Integer),
+      right_key: Sequel.pg_jsonb(:meta)['album_id'].cast(String).cast(Integer)
   end
 
 ==== :key_column [+many_to_one+]
 
 Like the :key option, but :key references the method name, while
-:key_column references the underlying column.
+:key_column references the underlying column/expression.
 
 ==== :primary_key_method [+many_to_one+]
 
-Like the :primary_key option, but :primary_key references the column
+Like the :primary_key option, but :primary_key references the column/expression
 name, while :primary_key_method references the method name.
 
 ==== :primary_key_column [+one_to_many+, +one_to_one+]
 
 Like the :primary_key option, but :primary_key references the method name, while
-:primary_key_column references the underlying column.
+:primary_key_column references the underlying column/expression.
 
 ==== :key_method [+one_to_many+, +one_to_one+]
 
-Like the :key option, but :key references the column
+Like the :key option, but :key references the column/expression
 name, while :key_method references the method name.
 
-==== :left_primary_key_column [+many_to_many+]
+==== :left_primary_key_column [+many_to_many+, +one_through_one+]
 
 Like the :left_primary_key option, but :left_primary_key references the method name, while
-:left_primary_key_column references the underlying column.
+:left_primary_key_column references the underlying column/expression.
 
-==== :right_primary_key_method [+many_to_many+]
+==== :right_primary_key_method [+many_to_many+, +one_through_one+]
 
-Like the :right_primary_key option, but :right_primary_key references the column
+Like the :right_primary_key option, but :right_primary_key references the column/expression
 name, while :right_primary_key_method references the method name.
-
-=== Private Method Overriding Options
-
-These options override the private methods that Sequel defines to do
-the actual work of associating and deassociating objects.
-
-==== :setter [*_to_one associations]
-
-This overrides the default behavior when you call an association setter
-method.  Let's say you want to set a specific field whenever associating an object
-using the association setter method.
-
-  class Album < Sequel::Model
-    many_to_one :artist, :setter=>(proc do |artist|
-      if artist
-        self.artist_id = artist.id
-        self.file_under = "#{artist.name}-#{name}"
-      else
-        self.artist_id = nil
-        self.file_under = name
-      end
-    end)
-  end
-
-==== :adder [*_to_many associations]
-
-Continuing with the same example, here's how would you handle the same case if
-you also wanted to handle the Artist#add_album method:
-
-  class Artist < Sequel::Model
-    one_to_many :albums, :adder=>(proc do |album|
-      album.update(:artist_id => id, :file_under=>"#{name}-#{album.name}")
-    end)
-  end
-
-==== :remover [*_to_many associations]
-
-Continuing with the same example, here's how would you handle the same case if
-you also wanted to handle the Artist#remove_album method:
-
-  class Artist < Sequel::Model
-    one_to_many :albums, :remover=>(proc do |album|
-      album.update(:artist_id => nil, :file_under=>album.name)
-    end)
-  end
-
-==== :clearer [*_to_many associations]
-
-Continuing with the same example, here's how would you handle the same case if
-you also wanted to handle the Artist#remove_all_albums method:
-
-  class Artist < Sequel::Model
-    one_to_many :albums, :clearer=>(proc do
-      albums_dataset.update(:artist_id => nil, :file_under=>:name)
-    end)
-  end
 
 === Advanced Options
 
@@ -1580,7 +1673,7 @@ Set to nil to not use a reciprocal.
 
 Reciprocals are used in Sequel to modify the matching cached associations
 in associated objects when calling association methods on the current object.
-For example, when you retrieve objects in a one_to_many association, it'll
+For example, when you retrieve objects in a one_to_many association, Sequel will
 automatically set the matching many_to_one association in the associated
 objects.  The result of this is that code that does this:
 
@@ -1618,9 +1711,8 @@ For +many_to_one+ and +one_to_one+ associations, do not add a setter method.
 For +one_to_many+ and +many_to_many+, do not add the add_<i>association</i>,
 remove_<i>association</i>, or remove_all_<i>association</i> methods.
 
-If the default modification methods would not do what you want, and you
-don't plan on overriding the internal modification methods to do what you
-want, it may be best to set this option to true.
+If you are not using the association modification methods, setting this
+value to true will save memory.
 
 ==== :validate
 
@@ -1631,22 +1723,69 @@ add_<i>association</i> method, Sequel will automatically save the object.
 If you don't want to validate objects when these implicit saves are done,
 the validate option should be set to false.
 
+==== :raise_on_save_failure [+one_to_many+ associations]
+
+Set to false to not raise an exception when validation or a before hook
+fails when implicitly saving an associated object in the add_* or remove_*
+methods.  This mirrors the raise_on_save_failure model setting, which these
+methods do not respect (by design).
+
+If you use this option, you must explicitly check all add_* and remove_* return
+values to see if they were successful.
+
 ==== :allow_eager
 
 If set to false, you cannot load the association eagerly via eager or
 eager_graph.
 
-  Artist.one_to_many :albums, :allow_eager=>false
-  Artist.eager(:albums) # Raises Sequel::Error
+  Artist.one_to_many :albums, allow_eager: false
+  Artist.eager(:albums)       # Raises Sequel::Error
+  Artist.eager_graph(:albums) # Raises Sequel::Error
 
 This is usually used if the association dataset depends on specific values in
 model instance that would not be valid when eager loading for multiple
 instances.
 
+==== :allow_eager_graph
+
+If set to false, you cannot load the association eagerly via eager_graph.
+
+  Artist.one_to_many :albums, allow_eager_graph: false
+  Artist.eager(:albums)       # Allowed
+  Artist.eager_graph(:albums) # Raises Sequel::Error
+
+This is useful if you still want to allow loading via eager, but do not want
+to allow loading via eager graph, possibly because the association does not
+support joins.
+
+==== :allow_filtering_by
+
+If set to false, you cannot use the association when filtering.
+
+  Artist.one_to_many :albums, allow_filtering_by: false
+  Artist.where(albums: Album.where(name: 'A')).all # Raises Sequel::Error
+
+This is useful if such filtering cannot work, such as when a subquery cannot
+be used because the necessary tables are not in the same database.
+
+==== :instance_specific
+
+This allows you to override the setting of whether the dataset contains instance
+specific code.  If you are passing a block to the association,
+Sequel sets this to true by default, which disables some optimizations that
+would be invalid if the association is instance specific.  If you know that the
+block does not contain instance specific code, you can set this to false to
+reenable the optimizations.  Instance specific code is mostly commonly calling
+model instance methods inside an association block, but also
+includes cases where the association block can return different values based
+on the runtime environment, such as calls to <tt>Time.now</tt> in the block.
+Associations that use the :dataset option are always considered instance specific,
+even if explicitly specified otherwise.
+
 ==== :cartesian_product_number 
 
 The number of joins completed by this association that could cause more
-than one row for each row in the current table (default: 0 for *_to_one
+than one row for each row in the current table (default: 0 for *_one
 associations, 1 for *_to_many associations).
 
 This should only be modified in specific cases.  For example, if you have
@@ -1656,12 +1795,25 @@ a many_to_many association where there is a unique index in the join table
 so that you know only one object will ever be associated through the
 association.
 
+==== :class_namespace
+
+If the :class option is specified as a symbol or string, the default namespace
+in which to look up the class. If the :class option is not specified as a
+symbol or string, this option is ignored.  This namespace can be overridden
+by starting the string or symbol with <tt>::</tt>:
+
+  Foo::Album.many_to_one :artist, class: "Artist"                                # Uses Artist
+  Foo::Album.many_to_one :artist, class: "Artist", class_namespace: 'Foo'        # Uses Foo::Artist
+  Foo::Album.many_to_one :artist, class: "Foo::Artist", class_namespace: 'Foo'   # Uses Foo::Foo::Artist
+  Foo::Album.many_to_one :artist, class: "::Artist", class_namespace: 'Foo'      # Uses Artist
+  Foo::Album.many_to_one :artist, class: "::Foo::Artist", class_namespace: 'Foo' # Uses Foo::Artist
+
 ==== :methods_module
 
 The module that the methods created by the association will be placed
-into.  Defaults to the module containing the model's columns.  This
-is not included in the model's class, so you are responsible for doing
-that manually.
+into.  Defaults to the module containing the model's columns.  Any module
+given to this option is not included in the model's class automatically,
+so you are responsible for doing that manually.
 
 This is only useful in rare cases, such as when a plugin that adds
 associations depends on another plugin that defines instance methods of
@@ -1671,41 +1823,37 @@ plugin.
 
 ==== :eager_limit_strategy
 
-This setting determines what strategy to use for loading the associations
+This setting determines what strategy to use for eager loading the associations
 that use the :limit setting to limit the number of returned records. You
 can't use LIMIT directly, since you want a limit for each group of
 associated records, not a LIMIT on the total number of records returned
 by the dataset.
 
-By default, if a *_to_many association uses a limit or offset, or a
-one_to_one association uses an offset, Sequel will choose to use an
-eager limit strategy.  The default strategy depends on the database
-being used.  For databases which support window functions, a window
-function will be used.  Other databases will just have an ruby array
-slice done on the entire record set.
-
-For one_to_one associations without offsets, no strategy is used by default
-because none is needed for a true one_to_one association (since there
-is only one associated record per current record).  However, if you are
-using a one_to_one association where the relationship is really one_to_many,
-and using an order to pick the first matching row, then if you don't
-specify an :eager_limit_strategy option, you'll be loading all related
-rows just to have Sequel ignore all rows after the first.  By using a
-strategy to change the query to only return one associated record per
-current record, you can get much better database performance.
-
 In general, Sequel picks an appropriate strategy, so it is not usually
-necessary to specify a specific strategy.  The exception is for one_to_one
-associations where there is more than one associated record per current
-record.  For those, you should probably specify true to this option to have
-Sequel pick an appropriate strategy.
+necessary to specify a strategy.  You can specify true for this option to
+have Sequel choose which strategy to use (this is the default).  You can
+specify a symbol to manually choose a strategy.  The available strategies are:
 
-You can also specify a symbol to manually choose a strategy.  The available
-strategies are:
-
+:union :: Uses one or more UNION queries with a subquery for each record
+          you are eagerly loading for (this is the default strategy).
 :distinct_on :: Uses DISTINCT ON to ensure only the first matching record
-                is loaded (only used for one_to_one associations without
+                is loaded (only used for one_*_one associations without
                 offsets on PostgreSQL).
 :window_function :: Uses a ROW_NUMBER window functions to ensure the
                     correctly limited/offset records are returned.
 :ruby :: Uses ruby array slicing to emulate database limiting/offsetting.
+
+==== :subqueries_per_union
+
+The number of subqueries per union query to use when eager loading for a
+limited association using a union strategy.  This defaults to 40, but the
+optimum number depends on the database in use and the latency between the
+database and the application.
+
+==== :filter_limit_strategy
+
+The strategy to use when filtering by limited associations.  In general
+Sequel will choose either a :distinct_on, :window_function, or
+:correlated_subquery strategy based on the association type and what
+the database supports, but you can override that if necessary using
+this option.
